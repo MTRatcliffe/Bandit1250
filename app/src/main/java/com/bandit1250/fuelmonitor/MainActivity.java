@@ -23,7 +23,7 @@ public final class MainActivity extends Activity {
 
     private Spinner spinner;
     private TextView status, ecu, live, raw, log;
-    private EditText flow, cal;
+    private EditText flow, latency, cal;
     private Button connect, init, poll;
 
     @Override public void onCreate(Bundle b){
@@ -43,12 +43,12 @@ public final class MainActivity extends Activity {
         sv.addView(root);
 
         TextView title=new TextView(this);
-        title.setText("Bandit Fuel Monitor — test");
+        title.setText("Bandit Fuel Monitor — v0.2.0-test (build 2)");
         title.setTextSize(24);
         root.addView(title);
 
         TextView note=new TextView(this);
-        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nRaw frames are shown so we can verify the Bandit decoder against SZ Viewer.");
+        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nFuel estimate is provisional; raw frames remain visible for decoder verification.");
         root.addView(note);
 
         spinner=new Spinner(this); root.addView(spinner);
@@ -66,11 +66,26 @@ public final class MainActivity extends Activity {
         status=text("Bluetooth: disconnected"); ecu=text("Suzuki ECU: not initialised");
         root.addView(status); root.addView(ecu);
 
-        flow=number("250.0"); flow.setHint("Injector flow cc/min (temporary test value)");
-        cal=number("1.000"); cal.setHint("Calibration factor");
-        root.addView(flow); root.addView(cal);
+        TextView modelHead=text("Fuel model (editable provisional assumptions)");
+        modelHead.setTextSize(17);
+        root.addView(modelHead);
 
-        live=text("RPM: —\nInj1: — ms\nInj2: — ms\nInj3: — ms\nInj4: — ms\nAverage: — ms\nFuel: — L/h");
+        TextView flowLabel=text("Injector static flow (cc/min @ ~3 bar)");
+        root.addView(flowLabel);
+        flow=number("220.0");
+        root.addView(flow);
+
+        TextView latencyLabel=text("Net injector latency (ms: opening delay minus closing-flow tail)");
+        root.addView(latencyLabel);
+        latency=number("0.600");
+        root.addView(latency);
+
+        TextView calLabel=text("Tank calibration factor");
+        root.addView(calLabel);
+        cal=number("1.000");
+        root.addView(cal);
+
+        live=text("RPM: —\nInj1: — ms\nInj2: — ms\nInj3: — ms\nInj4: — ms\nAverage commanded PW: — ms\nEstimated flowing PW: — ms\nPW-only fuel: — L/h\nEstimated fuel: — L/h");
         live.setTextSize(19); root.addView(live);
 
         TextView rh=text("Raw 2108 response"); rh.setTextSize(18); root.addView(rh);
@@ -164,12 +179,15 @@ public final class MainActivity extends Activity {
     private void decodeAndShow(String r){
         try{
             BanditLiveData d=BanditDecoder.decode(r);
-            double q=parse(flow.getText().toString(),250.0);
+            double q=parse(flow.getText().toString(),220.0);
+            double netLatency=parse(latency.getText().toString(),0.600);
             double factor=parse(cal.getText().toString(),1.0);
-            double lph=FuelCalculator.litresPerHour(d.rpm,d.averageMs,q,factor);
+            double flowingPw=FuelCalculator.effectivePulseMs(d.averageMs,netLatency);
+            double rawLph=FuelCalculator.rawLitresPerHour(d.rpm,d.averageMs,q,factor);
+            double estimatedLph=FuelCalculator.estimatedLitresPerHour(d.rpm,d.averageMs,q,netLatency,factor);
             live.setText(String.format(Locale.UK,
-                    "RPM: %d\nInj1: %.3f ms\nInj2: %.3f ms\nInj3: %.3f ms\nInj4: %.3f ms\nAverage: %.3f ms\nFuel: %.3f L/h",
-                    d.rpm,d.inj1,d.inj2,d.inj3,d.inj4,d.averageMs,lph));
+                    "RPM: %d\nInj1: %.3f ms\nInj2: %.3f ms\nInj3: %.3f ms\nInj4: %.3f ms\nAverage commanded PW: %.3f ms\nEstimated flowing PW: %.3f ms\nPW-only fuel: %.3f L/h\nEstimated fuel: %.3f L/h",
+                    d.rpm,d.inj1,d.inj2,d.inj3,d.inj4,d.averageMs,flowingPw,rawLph,estimatedLph));
         }catch(Exception e){
             live.setText("Decoder not yet valid for this frame:\n"+e.getMessage()+"\n\nRaw frame above is still useful.");
         }
