@@ -29,23 +29,9 @@ public final class SuzukiSds {
     }
 
     private static boolean containsSds2108Response(String response) {
-        String s = compactUpper(response);
-        return s.contains("6108");
+        return compactUpper(response).contains("6108");
     }
 
-    /**
-     * Exact ELM327 / Suzuki SDS initialisation sequence previously decoded
-     * for the 2008 GSF1250SA Bandit.
-     *
-     * Physical/protocol details:
-     *   - single-wire K-Line
-     *   - ISO 14230-4 / KWP2000 fast init
-     *   - 10,400 baud
-     *   - ECU address 0x12
-     *   - tester address 0xF1
-     *   - init header 81 12 F1
-     *   - normal header 80 12 F1
-     */
     public void initialise() throws IOException {
         run("ATZ", 4000);
         run("ATD", 2000);
@@ -82,16 +68,26 @@ public final class SuzukiSds {
     }
 
     /**
-     * Read the main Suzuki live-data record.
-     *
-     * The trailing "1" is an ELM-side instruction to stop after one response;
-     * the ECU request itself is still 21 08.
+     * Read 21 08. Cheap/clone ELMs occasionally return NO DATA when polled
+     * immediately after a previous response, so retry rather than dropping
+     * the session on the first missed frame.
      */
     public String read2108() throws IOException {
-        String response = run("2108 1", 3000);
-        if (!containsSds2108Response(response)) {
-            throw new IOException("No 61 08 SDS response: " + response.trim());
+        String last = "";
+        for (int attempt=1; attempt<=3; attempt++) {
+            String response = run("2108 1", 3000);
+            if (containsSds2108Response(response)) return response;
+            last = response;
+            if (attempt < 3) {
+                logger.log("2108 miss " + attempt + "/3; waiting 120 ms");
+                try {
+                    Thread.sleep(120);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting to retry 2108", e);
+                }
+            }
         }
-        return response;
+        throw new IOException("No 61 08 SDS response after 3 attempts: " + last.trim());
     }
 }
