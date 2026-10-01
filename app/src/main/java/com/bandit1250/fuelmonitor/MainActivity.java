@@ -4,9 +4,13 @@ import android.Manifest;
 import android.app.Activity;
 import android.bluetooth.*;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.Typeface;
 import android.location.*;
 import android.os.*;
 import android.text.InputType;
+import android.view.Gravity;
+import android.view.View;
 import android.widget.*;
 
 import java.util.*;
@@ -16,10 +20,16 @@ public final class MainActivity extends Activity {
     private static final int REQ_PERMS = 1001;
     private static final double UK_LITRES_PER_GALLON = 4.54609;
     private static final double MIN_MPG_SPEED_MPH = 3.0;
+    private static final long MPG_WINDOW_MS = 10_000L;
+
+    private static final int STATUS_RED = Color.rgb(190, 0, 0);
+    private static final int STATUS_YELLOW = Color.rgb(180, 130, 0);
+    private static final int STATUS_GREEN = Color.rgb(0, 130, 0);
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final List<BluetoothDevice> devices = new ArrayList<>();
+    private final ArrayDeque<MpgSample> mpgSamples = new ArrayDeque<>();
 
     private BluetoothAdapter adapter;
     private Elm327Client elm;
@@ -33,9 +43,33 @@ public final class MainActivity extends Activity {
     private volatile double lastEstimatedLph = Double.NaN;
 
     private Spinner spinner;
-    private TextView status, ecu, comms, gps, live, raw, log;
-    private EditText flow, latency, cal;
-    private Button connect, init, poll;
+    private TextView infoText;
+    private TextView status;
+    private TextView instantMpg;
+    private TextView avgMpg;
+    private TextView fuelRate;
+    private TextView gpsMeta;
+    private TextView decoded;
+    private TextView raw;
+    private TextView log;
+
+    private EditText flow;
+    private EditText latency;
+    private EditText cal;
+
+    private Button connect;
+
+    private static final class MpgSample {
+        final long timeMs;
+        final double speedMph;
+        final double lph;
+
+        MpgSample(long timeMs, double speedMph, double lph) {
+            this.timeMs = timeMs;
+            this.speedMph = speedMph;
+            this.lph = lph;
+        }
+    }
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -48,7 +82,7 @@ public final class MainActivity extends Activity {
         createLocationListener();
 
         if (adapter == null) {
-            status.setText("Bluetooth unavailable");
+            setBluetoothStatusRed("Bluetooth: unavailable");
             connect.setEnabled(false);
         }
 
@@ -57,61 +91,121 @@ public final class MainActivity extends Activity {
 
     private void buildUi() {
         ScrollView sv = new ScrollView(this);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(24,24,24,40);
+        root.setPadding(20, 12, 20, 36);
         sv.addView(root);
 
+        // ----- Compact single-line title + info button -----
+        LinearLayout titleRow = row();
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView title = new TextView(this);
-        title.setText("Bandit Fuel Monitor — v0.6.0-test (build 6)");
-        title.setTextSize(24);
-        root.addView(title);
+        title.setText("Bandit Monitor V0.7.0");
+        title.setTextSize(20);
+        title.setTypeface(null, Typeface.BOLD);
+        title.setSingleLine(true);
+        titleRow.addView(title, new LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+        ));
 
-        TextView note = new TextView(this);
-        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nDecoder uses the previously verified Bandit 61 08 offsets; GPS speed provides instantaneous UK MPG.");
-        root.addView(note);
+        Button infoButton = new Button(this);
+        infoButton.setText("ⓘ");
+        infoButton.setTextSize(16);
+        infoButton.setMinWidth(0);
+        infoButton.setMinimumWidth(0);
+        infoButton.setMinHeight(0);
+        infoButton.setMinimumHeight(0);
+        infoButton.setPadding(10, 0, 10, 0);
+        titleRow.addView(infoButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
 
+        root.addView(titleRow);
+
+        infoText = text(
+                "2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 21 08\n" +
+                "Connect performs Bluetooth connection, SDS initialisation and starts polling automatically.\n" +
+                "GPS speed is used for MPG. Fuel flow remains provisional until injector flow/latency is calibrated.\n" +
+                "Fields labelled 'est.' use published Suzuki scaling that has not yet been independently verified on this exact ECU."
+        );
+        infoText.setVisibility(View.GONE);
+        root.addView(infoText);
+
+        infoButton.setOnClickListener(v ->
+                infoText.setVisibility(
+                        infoText.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE
+                )
+        );
+
+        // ----- Device and the only normal workflow buttons -----
         spinner = new Spinner(this);
         root.addView(spinner);
 
-        LinearLayout r1 = row();
+        LinearLayout buttonRow = row();
+
         Button refresh = new Button(this);
-        refresh.setText("Refresh paired");
+        refresh.setText("REFRESH");
         refresh.setOnClickListener(v -> ensurePermissions());
+
         connect = new Button(this);
-        connect.setText("Connect ELM");
-        connect.setOnClickListener(v -> connect());
-        r1.addView(refresh, weight());
-        r1.addView(connect, weight());
-        root.addView(r1);
+        connect.setText("CONNECT");
+        connect.setOnClickListener(v -> connectAndRun());
 
-        LinearLayout r2 = row();
-        init = new Button(this);
-        init.setText("Initialise SDS");
-        init.setEnabled(false);
-        init.setOnClickListener(v -> initialise());
+        buttonRow.addView(refresh, weight());
+        buttonRow.addView(connect, weight());
+        root.addView(buttonRow);
 
-        poll = new Button(this);
-        poll.setText("Start 2108");
-        poll.setEnabled(false);
-        poll.setOnClickListener(v -> togglePoll());
-
-        r2.addView(init, weight());
-        r2.addView(poll, weight());
-        root.addView(r2);
-
-        status = text("Bluetooth: disconnected");
-        ecu = text("Suzuki ECU: not initialised");
-        comms = text("Comms: misses 0 • recoveries 0");
-        gps = text("GPS: waiting for permission/fix • Speed — mph • Est. UK MPG —");
-
+        // ----- Colour-coded connection overview -----
+        status = text("Bluetooth: not connected");
+        status.setTextSize(16);
+        status.setTypeface(null, Typeface.BOLD);
         root.addView(status);
-        root.addView(ecu);
-        root.addView(comms);
-        root.addView(gps);
+        setBluetoothStatusRed("Bluetooth: not connected");
 
-        TextView modelHead = text("Fuel model (editable provisional assumptions)");
-        modelHead.setTextSize(17);
+        // ----- Big, glanceable fuel economy panel -----
+        LinearLayout mpgPanel = new LinearLayout(this);
+        mpgPanel.setOrientation(LinearLayout.VERTICAL);
+        mpgPanel.setPadding(8, 12, 8, 12);
+        mpgPanel.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        instantMpg = new TextView(this);
+        instantMpg.setText("Instant MPG  —");
+        instantMpg.setTextSize(30);
+        instantMpg.setTypeface(null, Typeface.BOLD);
+        instantMpg.setGravity(Gravity.CENTER_HORIZONTAL);
+        mpgPanel.addView(instantMpg);
+
+        avgMpg = new TextView(this);
+        avgMpg.setText("10 s MPG  —");
+        avgMpg.setTextSize(23);
+        avgMpg.setTypeface(null, Typeface.BOLD);
+        avgMpg.setGravity(Gravity.CENTER_HORIZONTAL);
+        mpgPanel.addView(avgMpg);
+
+        fuelRate = new TextView(this);
+        fuelRate.setText("Fuel  — L/h");
+        fuelRate.setTextSize(22);
+        fuelRate.setTypeface(null, Typeface.BOLD);
+        fuelRate.setGravity(Gravity.CENTER_HORIZONTAL);
+        mpgPanel.addView(fuelRate);
+
+        gpsMeta = new TextView(this);
+        gpsMeta.setText("GPS: waiting for fix");
+        gpsMeta.setTextSize(14);
+        gpsMeta.setGravity(Gravity.CENTER_HORIZONTAL);
+        mpgPanel.addView(gpsMeta);
+
+        root.addView(mpgPanel);
+
+        // ----- Fuel model settings -----
+        TextView modelHead = text("Fuel model");
+        modelHead.setTextSize(16);
+        modelHead.setTypeface(null, Typeface.BOLD);
         root.addView(modelHead);
 
         TextView flowLabel = text("Injector static flow (cc/min @ ~3 bar)");
@@ -119,7 +213,7 @@ public final class MainActivity extends Activity {
         flow = number("220.0");
         root.addView(flow);
 
-        TextView latencyLabel = text("Net injector latency (ms: opening delay minus closing-flow tail)");
+        TextView latencyLabel = text("Net injector latency (ms)");
         root.addView(latencyLabel);
         latency = number("0.600");
         root.addView(latency);
@@ -129,33 +223,37 @@ public final class MainActivity extends Activity {
         cal = number("1.000");
         root.addView(cal);
 
-        live = text(
-                "RPM: —\n" +
-                "Inj1: — ms\n" +
-                "Inj2: — ms\n" +
-                "Inj3: — ms\n" +
-                "Inj4: — ms\n" +
-                "Average commanded PW: — ms\n" +
-                "Estimated flowing PW: — ms\n" +
-                "PW-only fuel: — L/h\n" +
-                "Estimated fuel: — L/h"
-        );
-        live.setTextSize(19);
-        root.addView(live);
+        // ----- SZ Viewer-style decoded live block -----
+        TextView decodedHead = text("Live ECU data");
+        decodedHead.setTextSize(18);
+        decodedHead.setTypeface(null, Typeface.BOLD);
+        root.addView(decodedHead);
 
-        TextView rh = text("Raw 2108 response");
-        rh.setTextSize(18);
-        root.addView(rh);
+        decoded = text("Waiting for SDS data…");
+        decoded.setTextSize(14);
+        decoded.setTypeface(Typeface.MONOSPACE);
+        decoded.setTextIsSelectable(true);
+        root.addView(decoded);
+
+        TextView rawHead = text("Raw 2108 response");
+        rawHead.setTextSize(16);
+        rawHead.setTypeface(null, Typeface.BOLD);
+        root.addView(rawHead);
 
         raw = text("—");
+        raw.setTextSize(12);
+        raw.setTypeface(Typeface.MONOSPACE);
         raw.setTextIsSelectable(true);
         root.addView(raw);
 
-        TextView lh = text("ELM / SDS log");
-        lh.setTextSize(18);
-        root.addView(lh);
+        TextView logHead = text("ELM / SDS log");
+        logHead.setTextSize(16);
+        logHead.setTypeface(null, Typeface.BOLD);
+        root.addView(logHead);
 
         log = text("");
+        log.setTextSize(11);
+        log.setTypeface(Typeface.MONOSPACE);
         log.setTextIsSelectable(true);
         root.addView(log);
 
@@ -179,7 +277,7 @@ public final class MainActivity extends Activity {
     private TextView text(String s) {
         TextView t = new TextView(this);
         t.setText(s);
-        t.setPadding(0,8,0,8);
+        t.setPadding(0, 5, 0, 5);
         return t;
     }
 
@@ -193,15 +291,32 @@ public final class MainActivity extends Activity {
         return e;
     }
 
+    private void setBluetoothStatusRed(String message) {
+        status.setText(message);
+        status.setTextColor(STATUS_RED);
+    }
+
+    private void setBluetoothStatusYellow(String message) {
+        status.setText(message);
+        status.setTextColor(STATUS_YELLOW);
+    }
+
+    private void setBluetoothStatusGreen(String message) {
+        status.setText(message);
+        status.setTextColor(STATUS_GREEN);
+    }
+
     private void ensurePermissions() {
         ArrayList<String> missing = new ArrayList<>();
 
         if (Build.VERSION.SDK_INT >= 31 &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                        != PackageManager.PERMISSION_GRANTED) {
             missing.add(Manifest.permission.BLUETOOTH_CONNECT);
         }
 
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
             missing.add(Manifest.permission.ACCESS_FINE_LOCATION);
         }
 
@@ -212,7 +327,11 @@ public final class MainActivity extends Activity {
         }
     }
 
-    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
+    @Override public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grants
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grants);
         if (requestCode == REQ_PERMS) afterPermissions();
     }
@@ -220,16 +339,18 @@ public final class MainActivity extends Activity {
     private void afterPermissions() {
         if (adapter != null) refreshPaired();
 
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED) {
             startGps();
         } else {
-            gps.setText("GPS permission denied • Speed — mph • Est. UK MPG —");
+            gpsMeta.setText("GPS permission denied");
         }
     }
 
     private void refreshPaired() {
         try {
             devices.clear();
+
             Set<BluetoothDevice> bonded = adapter.getBondedDevices();
             List<String> names = new ArrayList<>();
 
@@ -237,7 +358,7 @@ public final class MainActivity extends Activity {
                 devices.add(d);
                 names.add(
                         (d.getName() == null ? "Unknown" : d.getName()) +
-                        "\n" + d.getAddress()
+                        "  " + d.getAddress()
                 );
             }
 
@@ -247,9 +368,11 @@ public final class MainActivity extends Activity {
                     names
             ));
 
-            status.setText("Paired Bluetooth devices: " + devices.size());
+            if (!polling) {
+                setBluetoothStatusRed("Bluetooth: not connected");
+            }
         } catch (SecurityException e) {
-            status.setText("Bluetooth permission required");
+            setBluetoothStatusRed("Bluetooth: permission required");
         }
     }
 
@@ -258,37 +381,42 @@ public final class MainActivity extends Activity {
             @Override public void onLocationChanged(Location location) {
                 if (location == null) return;
 
-                gpsAccuracyM = location.hasAccuracy() ? location.getAccuracy() : Double.NaN;
+                gpsAccuracyM = location.hasAccuracy()
+                        ? location.getAccuracy()
+                        : Double.NaN;
 
-                if (location.hasSpeed()) {
-                    gpsSpeedMph = location.getSpeed() * 2.2369362920544;
-                } else {
-                    gpsSpeedMph = Double.NaN;
-                }
+                gpsSpeedMph = location.hasSpeed()
+                        ? location.getSpeed() * 2.2369362920544
+                        : Double.NaN;
 
-                updateGpsReadout();
+                updateMpgPanel();
             }
 
             @Override public void onProviderEnabled(String provider) {
-                updateGpsReadout();
+                updateMpgPanel();
             }
 
             @Override public void onProviderDisabled(String provider) {
                 if (LocationManager.GPS_PROVIDER.equals(provider)) {
                     gpsSpeedMph = Double.NaN;
-                    gps.setText("GPS disabled • Speed — mph • Est. UK MPG —");
+                    gpsMeta.setText("GPS disabled");
+                    updateMpgPanel();
                 }
             }
 
-            @Override public void onStatusChanged(String provider, int statusValue, Bundle extras) {
-                // Required on older Android API levels; no special handling needed.
+            @Override public void onStatusChanged(
+                    String provider,
+                    int statusValue,
+                    Bundle extras
+            ) {
+                // Compatibility callback for older Android API levels.
             }
         };
     }
 
     private void startGps() {
         if (locationManager == null) {
-            gps.setText("GPS unavailable • Speed — mph • Est. UK MPG —");
+            gpsMeta.setText("GPS unavailable");
             return;
         }
 
@@ -296,12 +424,10 @@ public final class MainActivity extends Activity {
             locationManager.removeUpdates(locationListener);
 
             if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                gps.setText("GPS disabled • Speed — mph • Est. UK MPG —");
+                gpsMeta.setText("GPS disabled");
                 return;
             }
 
-            // 500 ms / 0.5 m is responsive enough for a basic live MPG display
-            // without needing any external location library.
             locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
                     500L,
@@ -309,43 +435,17 @@ public final class MainActivity extends Activity {
                     locationListener
             );
 
-            gps.setText("GPS: waiting for fix • Speed — mph • Est. UK MPG —");
+            gpsMeta.setText("GPS: waiting for fix");
         } catch (SecurityException e) {
-            gps.setText("GPS permission required • Speed — mph • Est. UK MPG —");
+            gpsMeta.setText("GPS permission required");
         }
     }
 
-    private void updateGpsReadout() {
-        String speedText = Double.isNaN(gpsSpeedMph)
-                ? "—"
-                : String.format(Locale.UK, "%.1f", gpsSpeedMph);
-
-        String accuracyText = Double.isNaN(gpsAccuracyM)
-                ? "—"
-                : String.format(Locale.UK, "%.0f", gpsAccuracyM);
-
-        String mpgText = "—";
-
-        if (!Double.isNaN(gpsSpeedMph) &&
-                gpsSpeedMph >= MIN_MPG_SPEED_MPH &&
-                !Double.isNaN(lastEstimatedLph) &&
-                lastEstimatedLph > 0.05) {
-
-            double mpg = gpsSpeedMph * UK_LITRES_PER_GALLON / lastEstimatedLph;
-
-            if (Double.isFinite(mpg) && mpg >= 0.0 && mpg < 9999.0) {
-                mpgText = String.format(Locale.UK, "%.1f", mpg);
-            }
-        }
-
-        gps.setText(
-                "GPS: ±" + accuracyText + " m" +
-                " • Speed " + speedText + " mph" +
-                " • Est. UK MPG " + mpgText
-        );
-    }
-
-    private void connect() {
+    /**
+     * CONNECT is deliberately a one-button workflow:
+     * Bluetooth RFCOMM -> Suzuki SDS init -> first 2108 -> continuous polling.
+     */
+    private void connectAndRun() {
         if (devices.isEmpty()) {
             toast("Pair the ELM327 in Android Bluetooth settings first.");
             return;
@@ -354,69 +454,87 @@ public final class MainActivity extends Activity {
         int pos = spinner.getSelectedItemPosition();
         if (pos < 0) pos = 0;
 
-        BluetoothDevice d = devices.get(pos);
+        BluetoothDevice device = devices.get(pos);
+
+        // If reconnecting, break the existing blocking/polling session first.
+        polling = false;
+        if (elm != null) elm.close();
+
         connect.setEnabled(false);
+        connect.setText("CONNECTING…");
+        setBluetoothStatusYellow("Bluetooth: connecting…");
+
+        mpgSamples.clear();
 
         io.execute(() -> {
-            try {
-                if (elm != null) elm.close();
+            boolean bluetoothConnected = false;
 
-                elm = new Elm327Client(d);
+            try {
+                elm = new Elm327Client(device);
                 elm.connect();
+                bluetoothConnected = true;
+
+                ui.post(() ->
+                        setBluetoothStatusYellow(
+                                "Bluetooth: connected • starting SDS…"
+                        )
+                );
 
                 sds = new SuzukiSds(elm, this::appendLog);
-
-                ui.post(() -> {
-                    status.setText("Bluetooth: connected to " + safeName(d));
-                    init.setEnabled(true);
-                    connect.setEnabled(true);
-                });
-            } catch (Exception e) {
-                ui.post(() -> {
-                    status.setText("Connect failed: " + e.getMessage());
-                    connect.setEnabled(true);
-                });
-            }
-        });
-    }
-
-    private void initialise() {
-        if (sds == null) return;
-
-        init.setEnabled(false);
-
-        io.execute(() -> {
-            try {
                 sds.initialise();
+
                 String first = sds.read2108();
 
-                ui.post(() -> {
-                    ecu.setText("Suzuki ECU: SDS initialised");
-                    raw.setText(first);
-                    poll.setEnabled(true);
-                    init.setEnabled(true);
-                    decodeAndShow(first);
+                polling = true;
 
-                    if (sds != null) {
-                        comms.setText(
-                                "Comms: misses " + sds.getMissedFrames() +
-                                " • recoveries " + sds.getRecoveryCount()
+                ui.post(() -> {
+                    raw.setText(first);
+                    decodeAndShow(first);
+                    updateConnectedStatus();
+                    connect.setText("RECONNECT");
+                    connect.setEnabled(true);
+                });
+
+                pollLoop();
+
+            } catch (Exception e) {
+                polling = false;
+
+                final boolean btWasConnected = bluetoothConnected;
+                final String message = e.getMessage();
+
+                ui.post(() -> {
+                    if (btWasConnected) {
+                        setBluetoothStatusYellow(
+                                "Bluetooth: connected • SDS not communicating"
+                        );
+                    } else {
+                        setBluetoothStatusRed(
+                                "Bluetooth: connection failed"
                         );
                     }
-                });
-            } catch (Exception e) {
-                ui.post(() -> {
-                    ecu.setText("SDS init failed: " + e.getMessage());
-                    init.setEnabled(true);
+
+                    appendLog("CONNECT/INIT ERROR: " + message);
+                    connect.setText("CONNECT");
+                    connect.setEnabled(true);
                 });
             }
         });
     }
 
-    private void togglePoll() {
-        polling = !polling;
-        poll.setText(polling ? "Stop 2108" : "Start 2108");
-        if (polling) io.execute(this::pollLoop);
+    private void updateConnectedStatus() {
+        if (sds == null) {
+            setBluetoothStatusYellow(
+                    "Bluetooth: connected • SDS not communicating"
+            );
+            return;
+        }
+
+        setBluetoothStatusGreen(
+                "Bluetooth: connected + communicating" +
+                " • misses " + sds.getMissedFrames() +
+                " • recoveries " + sds.getRecoveryCount()
+        );
     }
 
     private void pollLoop() {
@@ -427,13 +545,7 @@ public final class MainActivity extends Activity {
                 ui.post(() -> {
                     raw.setText(r);
                     decodeAndShow(r);
-
-                    if (sds != null) {
-                        comms.setText(
-                                "Comms: misses " + sds.getMissedFrames() +
-                                " • recoveries " + sds.getRecoveryCount()
-                        );
-                    }
+                    updateConnectedStatus();
                 });
 
                 try {
@@ -442,36 +554,32 @@ public final class MainActivity extends Activity {
                     Thread.currentThread().interrupt();
                     polling = false;
                 }
+
             } catch (Exception e) {
+                boolean wasPolling = polling;
                 polling = false;
 
-                ui.post(() -> {
-                    poll.setText("Start 2108");
-                    ecu.setText("Polling stopped: " + e.getMessage());
-                });
+                if (wasPolling) {
+                    ui.post(() -> {
+                        setBluetoothStatusYellow(
+                                "Bluetooth: connected • SDS not communicating"
+                        );
+                        appendLog("POLLING STOPPED: " + e.getMessage());
+                        connect.setText("RECONNECT");
+                        connect.setEnabled(true);
+                    });
+                }
             }
         }
     }
 
-    private void decodeAndShow(String r) {
+    private void decodeAndShow(String response) {
         try {
-            BanditLiveData d = BanditDecoder.decode(r);
+            BanditLiveData d = BanditDecoder.decode(response);
 
             double q = parse(flow.getText().toString(), 220.0);
             double netLatency = parse(latency.getText().toString(), 0.600);
             double factor = parse(cal.getText().toString(), 1.0);
-
-            double flowingPw = FuelCalculator.effectivePulseMs(
-                    d.averageMs,
-                    netLatency
-            );
-
-            double rawLph = FuelCalculator.rawLitresPerHour(
-                    d.rpm,
-                    d.averageMs,
-                    q,
-                    factor
-            );
 
             double estimatedLph = FuelCalculator.estimatedLitresPerHour(
                     d.rpm,
@@ -482,39 +590,177 @@ public final class MainActivity extends Activity {
             );
 
             lastEstimatedLph = estimatedLph;
-            updateGpsReadout();
 
-            live.setText(String.format(
-                    Locale.UK,
-                    "RPM: %d\n" +
-                    "Inj1: %.3f ms\n" +
-                    "Inj2: %.3f ms\n" +
-                    "Inj3: %.3f ms\n" +
-                    "Inj4: %.3f ms\n" +
-                    "Average commanded PW: %.3f ms\n" +
-                    "Estimated flowing PW: %.3f ms\n" +
-                    "PW-only fuel: %.3f L/h\n" +
-                    "Estimated fuel: %.3f L/h",
-                    d.rpm,
-                    d.inj1,
-                    d.inj2,
-                    d.inj3,
-                    d.inj4,
-                    d.averageMs,
-                    flowingPw,
-                    rawLph,
-                    estimatedLph
-            ));
+            decoded.setText(
+                    BanditDecoder.formatAll(d) +
+                    String.format(
+                            Locale.UK,
+                            "\n\nFuel model\n" +
+                            "Estimated flowing PW  %.3f ms\n" +
+                            "Estimated fuel        %.3f L/h",
+                            FuelCalculator.effectivePulseMs(
+                                    d.averageMs,
+                                    netLatency
+                            ),
+                            estimatedLph
+                    )
+            );
+
+            updateMpgPanel();
+
         } catch (Exception e) {
             lastEstimatedLph = Double.NaN;
-            updateGpsReadout();
 
-            live.setText(
-                    "Decoder not yet valid for this frame:\n" +
-                    e.getMessage() +
-                    "\n\nRaw frame above is still useful."
+            decoded.setText(
+                    "Decoder error: " + e.getMessage() +
+                    "\nRaw frame remains available below."
             );
+
+            updateMpgPanel();
         }
+    }
+
+    private void updateMpgPanel() {
+        double instant = calculateInstantMpg();
+
+        if (Double.isFinite(instant)) {
+            instantMpg.setText(
+                    String.format(Locale.UK, "Instant MPG  %.1f", instant)
+            );
+        } else {
+            instantMpg.setText("Instant MPG  —");
+        }
+
+        if (Double.isFinite(lastEstimatedLph)) {
+            fuelRate.setText(
+                    String.format(Locale.UK, "Fuel  %.3f L/h", lastEstimatedLph)
+            );
+        } else {
+            fuelRate.setText("Fuel  — L/h");
+        }
+
+        if (Double.isFinite(gpsSpeedMph) &&
+                Double.isFinite(lastEstimatedLph)) {
+            addMpgSample(gpsSpeedMph, lastEstimatedLph);
+        } else {
+            pruneMpgSamples();
+        }
+
+        double rolling = calculateRolling10sMpg();
+
+        if (Double.isFinite(rolling)) {
+            avgMpg.setText(
+                    String.format(Locale.UK, "10 s MPG  %.1f", rolling)
+            );
+        } else {
+            avgMpg.setText("10 s MPG  —");
+        }
+
+        String speed = Double.isNaN(gpsSpeedMph)
+                ? "—"
+                : String.format(Locale.UK, "%.1f", gpsSpeedMph);
+
+        String accuracy = Double.isNaN(gpsAccuracyM)
+                ? "—"
+                : String.format(Locale.UK, "%.0f", gpsAccuracyM);
+
+        gpsMeta.setText(
+                "GPS " + speed + " mph  •  ±" + accuracy + " m"
+        );
+    }
+
+    private double calculateInstantMpg() {
+        if (!Double.isFinite(gpsSpeedMph) ||
+                gpsSpeedMph < MIN_MPG_SPEED_MPH ||
+                !Double.isFinite(lastEstimatedLph) ||
+                lastEstimatedLph <= 0.05) {
+            return Double.NaN;
+        }
+
+        double mpg =
+                gpsSpeedMph * UK_LITRES_PER_GALLON / lastEstimatedLph;
+
+        if (!Double.isFinite(mpg) || mpg < 0.0 || mpg > 9999.0) {
+            return Double.NaN;
+        }
+
+        return mpg;
+    }
+
+    private void addMpgSample(double speedMph, double lph) {
+        long now = SystemClock.elapsedRealtime();
+
+        mpgSamples.addLast(new MpgSample(
+                now,
+                Math.max(0.0, speedMph),
+                Math.max(0.0, lph)
+        ));
+
+        pruneMpgSamples();
+    }
+
+    private void pruneMpgSamples() {
+        long cutoff = SystemClock.elapsedRealtime() - MPG_WINDOW_MS - 1000L;
+
+        while (mpgSamples.size() > 2 &&
+                mpgSamples.peekFirst().timeMs < cutoff) {
+            mpgSamples.removeFirst();
+        }
+    }
+
+    /**
+     * Physically meaningful 10 s average:
+     * integrate distance and fuel over the window, then divide them.
+     * This is better than arithmetic-averaging instantaneous MPG.
+     */
+    private double calculateRolling10sMpg() {
+        if (mpgSamples.size() < 2) return Double.NaN;
+
+        MpgSample previous = null;
+        double miles = 0.0;
+        double litres = 0.0;
+        long firstTime = -1;
+        long lastTime = -1;
+
+        for (MpgSample current : mpgSamples) {
+            if (previous != null) {
+                long dtMs = current.timeMs - previous.timeMs;
+
+                if (dtMs > 0) {
+                    double hours = dtMs / 3_600_000.0;
+
+                    double avgSpeed =
+                            (previous.speedMph + current.speedMph) / 2.0;
+
+                    double avgLph =
+                            (previous.lph + current.lph) / 2.0;
+
+                    miles += avgSpeed * hours;
+                    litres += avgLph * hours;
+                }
+            } else {
+                firstTime = current.timeMs;
+            }
+
+            lastTime = current.timeMs;
+            previous = current;
+        }
+
+        // Don't present a "10 second" number from a tiny initial sample.
+        if (firstTime < 0 || lastTime - firstTime < 2000L) {
+            return Double.NaN;
+        }
+
+        // At/near standstill the L/h readout is the useful metric.
+        if (miles < 0.001 || litres <= 0.000001) {
+            return Double.NaN;
+        }
+
+        double mpg = miles / (litres / UK_LITRES_PER_GALLON);
+
+        return Double.isFinite(mpg) && mpg < 9999.0
+                ? mpg
+                : Double.NaN;
     }
 
     private void appendLog(String s) {
@@ -534,14 +780,6 @@ public final class MainActivity extends Activity {
             return Double.parseDouble(s.trim());
         } catch (Exception e) {
             return def;
-        }
-    }
-
-    private String safeName(BluetoothDevice d) {
-        try {
-            return d.getName() == null ? d.getAddress() : d.getName();
-        } catch (SecurityException e) {
-            return "ELM327";
         }
     }
 
