@@ -63,12 +63,12 @@ public final class MainActivity extends Activity {
         sv.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("Bandit Fuel Monitor — v0.5.0-test (build 5)");
+        title.setText("Bandit Fuel Monitor — v0.6.0-test (build 6)");
         title.setTextSize(24);
         root.addView(title);
 
         TextView note = new TextView(this);
-        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nGPS speed is combined with estimated fuel flow for basic instantaneous UK MPG.");
+        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nDecoder uses the previously verified Bandit 61 08 offsets; GPS speed provides instantaneous UK MPG.");
         root.addView(note);
 
         spinner = new Spinner(this);
