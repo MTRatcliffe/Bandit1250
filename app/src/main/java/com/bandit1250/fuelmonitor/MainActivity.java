@@ -22,7 +22,7 @@ public final class MainActivity extends Activity {
     private volatile boolean polling=false;
 
     private Spinner spinner;
-    private TextView status, ecu, live, raw, log;
+    private TextView status, ecu, comms, live, raw, log;
     private EditText flow, latency, cal;
     private Button connect, init, poll;
 
@@ -43,12 +43,12 @@ public final class MainActivity extends Activity {
         sv.addView(root);
 
         TextView title=new TextView(this);
-        title.setText("Bandit Fuel Monitor — v0.3.0-test (build 3)");
+        title.setText("Bandit Fuel Monitor — v0.4.0-test (build 4)");
         title.setTextSize(24);
         root.addView(title);
 
         TextView note=new TextView(this);
-        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nRPM + injector mapping now based on a real Bandit idle frame; fuel model remains provisional.");
+        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nRobust polling: ~200 ms ELM timeout, Tester Present keepalive and automatic SDS recovery.");
         root.addView(note);
 
         spinner=new Spinner(this); root.addView(spinner);
@@ -64,7 +64,8 @@ public final class MainActivity extends Activity {
         r2.addView(init,weight()); r2.addView(poll,weight()); root.addView(r2);
 
         status=text("Bluetooth: disconnected"); ecu=text("Suzuki ECU: not initialised");
-        root.addView(status); root.addView(ecu);
+        comms=text("Comms: misses 0 • recoveries 0");
+        root.addView(status); root.addView(ecu); root.addView(comms);
 
         TextView modelHead=text("Fuel model (editable provisional assumptions)");
         modelHead.setTextSize(17);
@@ -153,6 +154,7 @@ public final class MainActivity extends Activity {
                     poll.setEnabled(true);
                     init.setEnabled(true);
                     decodeAndShow(first);
+                    if(sds!=null) comms.setText("Comms: misses "+sds.getMissedFrames()+" • recoveries "+sds.getRecoveryCount());
                 });
             }catch(Exception e){ ui.post(()->{ ecu.setText("SDS init failed: "+e.getMessage()); init.setEnabled(true); }); }
         });
@@ -168,8 +170,12 @@ public final class MainActivity extends Activity {
         while(polling && sds!=null){
             try{
                 String r=sds.read2108();
-                ui.post(()->{ raw.setText(r); decodeAndShow(r); });
-                try { Thread.sleep(100); }
+                ui.post(()->{
+                    raw.setText(r);
+                    decodeAndShow(r);
+                    if(sds!=null) comms.setText("Comms: misses "+sds.getMissedFrames()+" • recoveries "+sds.getRecoveryCount());
+                });
+                try { Thread.sleep(120); }
                 catch(InterruptedException ie){ Thread.currentThread().interrupt(); polling=false; }
             }catch(Exception e){
                 polling=false;
