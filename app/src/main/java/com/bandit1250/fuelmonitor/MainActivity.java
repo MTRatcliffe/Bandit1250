@@ -43,12 +43,12 @@ public final class MainActivity extends Activity {
         sv.addView(root);
 
         TextView title=new TextView(this);
-        title.setText("Bandit Fuel Monitor — v0.2.0-test (build 2)");
+        title.setText("Bandit Fuel Monitor — v0.3.0-test (build 3)");
         title.setTextSize(24);
         root.addView(title);
 
         TextView note=new TextView(this);
-        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nFuel estimate is provisional; raw frames remain visible for decoder verification.");
+        note.setText("2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 2108\nRPM + injector mapping now based on a real Bandit idle frame; fuel model remains provisional.");
         root.addView(note);
 
         spinner=new Spinner(this); root.addView(spinner);
@@ -169,6 +169,8 @@ public final class MainActivity extends Activity {
             try{
                 String r=sds.read2108();
                 ui.post(()->{ raw.setText(r); decodeAndShow(r); });
+                try { Thread.sleep(100); }
+                catch(InterruptedException ie){ Thread.currentThread().interrupt(); polling=false; }
             }catch(Exception e){
                 polling=false;
                 ui.post(()->{ poll.setText("Start 2108"); ecu.setText("Polling stopped: "+e.getMessage()); });
