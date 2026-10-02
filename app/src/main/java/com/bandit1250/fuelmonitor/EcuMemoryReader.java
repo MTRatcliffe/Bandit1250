@@ -626,6 +626,276 @@ public final class EcuMemoryReader {
                 response.trim().endsWith("?");
     }
 
+    public static final class DensoReadOnlyTestResult {
+        public final String report;
+
+        DensoReadOnlyTestResult(String report) {
+            this.report = report;
+        }
+    }
+
+    /**
+     * Additional conservative Denso/Suzuki discovery.
+     *
+     * The diagnostic requests are all read-only (0x1A, 0x21 and 0x22).
+     * The transport tests temporarily change only ELM/K-Line communication
+     * parameters, then restore the normal Suzuki SDS fast-init session.
+     *
+     * No ECU reset, security key, programming-session selection, write,
+     * erase, routine, actuator, download or flash command is sent.
+     */
+    public static DensoReadOnlyTestResult testDensoReadOnlyPaths(
+            SuzukiSds sds
+    ) throws IOException {
+        StringBuilder report = new StringBuilder();
+
+        report.append("DENSO / SUZUKI READ-ONLY COMPATIBILITY TEST\n");
+        report.append("ECU: known family ID 32920-18H0* via 1A91\n");
+        report.append("No write/erase/reset/routine/actuator/security-key commands used.\n\n");
+
+        report.append("[1] Baseline SDS identity\n");
+        String baseline = safeRequest(sds, "1A91", 4000);
+        report.append("1A91 -> ").append(oneLine(baseline)).append("\n");
+
+        report.append("\n[2] Suzuki/Denso ECU-identification local IDs 0x80..0x9F\n");
+        int idHits = 0;
+
+        for (int id = 0x80; id <= 0x9F; id++) {
+            String request = String.format(Locale.US, "1A%02X", id);
+            String response = safeRequest(sds, request, 1800);
+
+            if (isPositiveService(response, 0x5A)) {
+                idHits++;
+                report.append(request)
+                        .append(" -> ")
+                        .append(oneLine(response));
+
+                String ascii = printablePayloadAfter(response, 0x5A, id);
+                if (!ascii.isEmpty()) {
+                    report.append("   ASCII: ").append(ascii);
+                }
+                report.append("\n");
+            }
+        }
+
+        report.append("Positive 0x1A identifiers: ")
+                .append(idHits)
+                .append(" / 32\n");
+
+        report.append("\n[3] ReadDataByLocalIdentifier 0x21, IDs 00..1F\n");
+        int localHits = 0;
+
+        for (int id = 0x00; id <= 0x1F; id++) {
+            String request = String.format(Locale.US, "21%02X", id);
+            String response = safeRequest(sds, request, 1800);
+            String hex = compactHex(response);
+            String positive = String.format(Locale.US, "61%02X", id);
+
+            if (hex.contains(positive)) {
+                localHits++;
+                report.append(request)
+                        .append(" -> ")
+                        .append(oneLine(response))
+                        .append("\n");
+            }
+        }
+
+        report.append("Positive 0x21 local IDs: ")
+                .append(localHits)
+                .append(" / 32\n");
+
+        report.append("\n[4] ReadDataByCommonIdentifier 0x22 probes\n");
+        String[] commonIds = {
+                "F180", "F181", "F182", "F187",
+                "F18A", "F18C", "F190", "0000"
+        };
+
+        for (String did : commonIds) {
+            String request = "22" + did;
+            String response = safeRequest(sds, request, 2200);
+
+            report.append(request)
+                    .append(" -> ")
+                    .append(oneLine(response))
+                    .append("\n");
+        }
+
+        report.append("\n[5] Alternate K-Line init paths supported by ELM327\n");
+        report.append(
+                "These tests only change adapter/init timing/baud temporarily, " +
+                "then try the known read-only 1A91 identifier.\n"
+        );
+
+        probeKlineVariant(
+                report,
+                sds,
+                "KWP slow init @ 10400, init address 0x12",
+                "ATIB10",
+                "ATTP4",
+                true
+        );
+
+        probeKlineVariant(
+                report,
+                sds,
+                "KWP slow init @ 9600, init address 0x12",
+                "ATIB96",
+                "ATTP4",
+                true
+        );
+
+        probeKlineVariant(
+                report,
+                sds,
+                "KWP fast init @ 9600",
+                "ATIB96",
+                "ATTP5",
+                false
+        );
+
+        report.append("\n[6] Restore normal Bandit SDS fast-init @ 10400\n");
+
+        try {
+            sds.initialise();
+            String restored = safeRequest(sds, "1A91", 4000);
+            report.append("Normal SDS restored. 1A91 -> ")
+                    .append(oneLine(restored))
+                    .append("\n");
+        } catch (IOException e) {
+            report.append("RESTORE ERROR: ")
+                    .append(e.getMessage())
+                    .append("\n");
+        }
+
+        report.append("\nINTERPRETATION\n");
+        report.append(
+                "If an alternate init returns 5A91 while normal SDS is closed, " +
+                "there is another reachable K-Line path using only the existing wire.\n"
+        );
+        report.append(
+                "If all alternate init paths fail but normal SDS restores, the " +
+                "remaining likely flash path needs either a proprietary raw bootloader " +
+                "handshake that ELM cannot express or an additional ECU enable pin."
+        );
+
+        return new DensoReadOnlyTestResult(report.toString().trim());
+    }
+
+    private static void probeKlineVariant(
+            StringBuilder report,
+            SuzukiSds sds,
+            String label,
+            String baudCommand,
+            String protocolCommand,
+            boolean slowInit
+    ) {
+        report.append("\n").append(label).append("\n");
+
+        try {
+            appendAt(report, sds, "ATPC", 2500);
+            appendAt(report, sds, baudCommand, 2500);
+            appendAt(report, sds, "ATIIA12", 2500);
+            appendAt(report, sds, protocolCommand, 2500);
+            appendAt(report, sds, "ATSH8112F1", 2500);
+
+            String init = sds.requestRaw(
+                    slowInit ? "ATSI" : "ATFI",
+                    slowInit ? 7000 : 5000
+            );
+
+            report.append(slowInit ? "ATSI" : "ATFI")
+                    .append(" -> ")
+                    .append(oneLine(init))
+                    .append("\n");
+
+            // If the adapter completed an init, try the same known-good,
+            // strictly read-only Suzuki ECU identifier.
+            appendAt(report, sds, "ATSH8012F1", 2500);
+
+            String id = safeRequest(sds, "1A91", 4000);
+            report.append("1A91 -> ")
+                    .append(oneLine(id))
+                    .append("\n");
+
+            if (containsPositiveLocalIdentifier(id, 0x91)) {
+                report.append("    *** Alternate path reached ECU ID successfully ***\n");
+            }
+
+        } catch (Exception e) {
+            report.append("    Test error: ")
+                    .append(e.getMessage())
+                    .append("\n");
+        }
+    }
+
+    private static void appendAt(
+            StringBuilder report,
+            SuzukiSds sds,
+            String command,
+            long timeoutMs
+    ) {
+        String response;
+
+        try {
+            response = sds.requestRaw(command, timeoutMs);
+        } catch (IOException e) {
+            response = "I/O ERROR: " + e.getMessage();
+        }
+
+        report.append(command)
+                .append(" -> ")
+                .append(oneLine(response))
+                .append("\n");
+    }
+
+    private static String printablePayloadAfter(
+            String response,
+            int positiveService,
+            int localId
+    ) {
+        if (response == null) return "";
+
+        String hex = compactHex(response);
+        String marker = String.format(
+                Locale.US,
+                "%02X%02X",
+                positiveService & 0xFF,
+                localId & 0xFF
+        );
+
+        int p = hex.indexOf(marker);
+        if (p < 0) return "";
+
+        String payload = hex.substring(p + marker.length());
+        StringBuilder ascii = new StringBuilder();
+
+        for (int i = 0; i + 1 < payload.length(); i += 2) {
+            int value;
+
+            try {
+                value = Integer.parseInt(payload.substring(i, i + 2), 16);
+            } catch (NumberFormatException e) {
+                break;
+            }
+
+            if (value == 0x00 || value == 0xFF) continue;
+
+            if (value >= 0x20 && value <= 0x7E) {
+                ascii.append((char)value);
+            } else {
+                ascii.append('.');
+            }
+        }
+
+        return ascii.toString();
+    }
+
+    private static String compactHex(String value) {
+        if (value == null) return "";
+        return value.toUpperCase(Locale.US)
+                .replaceAll("[^0-9A-F]", "");
+    }
+
     public static final class ReadResult {
         public final File file;
         public final long bytes;
