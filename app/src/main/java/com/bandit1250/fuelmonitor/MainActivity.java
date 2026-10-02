@@ -966,10 +966,10 @@ public final class MainActivity extends Activity {
     }
 
     private String o2Guess(int rawValue) {
-        // Provisional narrow-band interpretation from Suzuki SDS reverse-
-        // engineering. 0xFF is commonly an unavailable/not-valid sentinel in
-        // this data block and must not be interpreted as "very rich".
-        if (rawValue < 0 || rawValue == 255) return "N/A";
+        // Deliberately keep this as a simple raw-value interpretation.
+        // Do not special-case 0xFF: if an O2 eliminator or fault leaves the
+        // byte fixed high, that static raw value is itself diagnostically useful.
+        if (rawValue < 0) return "—";
         if (rawValue < 28) return "LEAN?";
         if (rawValue > 28) return "RICH?";
         return "CROSS?";
