@@ -68,6 +68,7 @@ public final class MainActivity extends Activity {
     private TextView fuelRate;
     private TextView gpsMeta;
     private TextView decoded;
+    private TableLayout liveTable;
     private TextView raw;
     private TextView log;
 
