@@ -36,6 +36,8 @@ public final class EcuToolsDialog {
     private Button readDtc;
     private Button clearDtc;
     private Button probeRead;
+    private Button elmLengthTest;
+    private Button densoReadOnlyTest;
 
     public EcuToolsDialog(MainActivity activity) {
         this.activity = activity;
@@ -112,6 +114,16 @@ public final class EcuToolsDialog {
         probeRead.setText("RUN SAFE ECU DISCOVERY");
         probeRead.setOnClickListener(v -> confirmProbe());
         box.addView(probeRead);
+
+        elmLengthTest = new Button(activity);
+        elmLengthTest.setText("ELM MESSAGE LENGTH TEST");
+        elmLengthTest.setOnClickListener(v -> confirmElmLengthTest());
+        box.addView(elmLengthTest);
+
+        densoReadOnlyTest = new Button(activity);
+        densoReadOnlyTest.setText("DENSO / K-LINE READ-ONLY TESTS");
+        densoReadOnlyTest.setOnClickListener(v -> confirmDensoReadOnlyTest());
+        box.addView(densoReadOnlyTest);
 
         experimentalResult = mono(
                 "No ECU discovery pass performed yet."
@@ -215,7 +227,7 @@ public final class EcuToolsDialog {
     }
 
     private void startProbe() {
-        probeRead.setEnabled(false);
+        setExperimentalBusy(true);
         experimentalResult.setText(
                 "Running conservative ECU discovery…\n" +
                 "Live 21 08 polling is temporarily paused."
@@ -225,7 +237,7 @@ public final class EcuToolsDialog {
                 "safe ECU discovery",
                 EcuMemoryReader::safeDiscovery,
                 (discovery, error) -> {
-                    probeRead.setEnabled(true);
+                    setExperimentalBusy(false);
 
                     if (error != null) {
                         experimentalResult.setText(
@@ -268,6 +280,100 @@ public final class EcuToolsDialog {
                     }
                 }
         );
+    }
+
+    private void confirmElmLengthTest() {
+        new AlertDialog.Builder(activity)
+                .setTitle("Run ELM message-length test?")
+                .setMessage(
+                        "This uses the known read-only 1A91 ECU-ID request and adds " +
+                        "zero padding to increasing request lengths. It is intended to " +
+                        "prove whether '?' responses originate in the V-LINK/ELM parser.\n\n" +
+                        "No ECU write, erase, reset, routine or actuator commands are sent."
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Run test", (d, which) -> startElmLengthTest())
+                .show();
+    }
+
+    private void startElmLengthTest() {
+        setExperimentalBusy(true);
+        experimentalResult.setText(
+                "Running ELM / K-Line message-length test…\n" +
+                "Live 21 08 polling is temporarily paused."
+        );
+
+        activity.runExclusiveSdsTask(
+                "ELM length test",
+                EcuMemoryReader::testElmMessageLength,
+                (result, error) -> {
+                    setExperimentalBusy(false);
+
+                    if (error != null) {
+                        experimentalResult.setText(
+                                "ELM length test failed:\n" + error.getMessage()
+                        );
+                        return;
+                    }
+
+                    experimentalResult.setText(
+                            result == null
+                                    ? "ELM length test returned no result."
+                                    : result.report
+                    );
+                }
+        );
+    }
+
+    private void confirmDensoReadOnlyTest() {
+        new AlertDialog.Builder(activity)
+                .setTitle("Run Denso / K-Line read-only tests?")
+                .setMessage(
+                        "This performs additional read-only Suzuki/Denso identifier/data " +
+                        "queries and temporarily tests alternate KWP initialisation at " +
+                        "10,400 and 9,600 baud. The normal Bandit SDS connection is then " +
+                        "restored automatically.\n\n" +
+                        "It does not select a programming session, send a security key, " +
+                        "reset the ECU, write/erase memory or operate actuators."
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Run tests", (d, which) -> startDensoReadOnlyTest())
+                .show();
+    }
+
+    private void startDensoReadOnlyTest() {
+        setExperimentalBusy(true);
+        experimentalResult.setText(
+                "Running Denso / Suzuki read-only compatibility tests…\n" +
+                "This may take around a minute."
+        );
+
+        activity.runExclusiveSdsTask(
+                "Denso read-only test",
+                EcuMemoryReader::testDensoReadOnlyPaths,
+                (result, error) -> {
+                    setExperimentalBusy(false);
+
+                    if (error != null) {
+                        experimentalResult.setText(
+                                "Denso compatibility test failed:\n" + error.getMessage()
+                        );
+                        return;
+                    }
+
+                    experimentalResult.setText(
+                            result == null
+                                    ? "Denso compatibility test returned no result."
+                                    : result.report
+                    );
+                }
+        );
+    }
+
+    private void setExperimentalBusy(boolean busy) {
+        if (probeRead != null) probeRead.setEnabled(!busy);
+        if (elmLengthTest != null) elmLengthTest.setEnabled(!busy);
+        if (densoReadOnlyTest != null) densoReadOnlyTest.setEnabled(!busy);
     }
 
     private void chooseDumpSize(EcuMemoryReader.ProbeResult probe) {
@@ -313,7 +419,7 @@ public final class EcuToolsDialog {
         );
         progress.show();
 
-        probeRead.setEnabled(false);
+        setExperimentalBusy(true);
 
         File dir = new File(activity.getFilesDir(), "ecu_dumps");
         String stamp = new SimpleDateFormat(
@@ -355,7 +461,7 @@ public final class EcuToolsDialog {
                                 })
                 ),
                 (result, error) -> {
-                    probeRead.setEnabled(true);
+                    setExperimentalBusy(false);
 
                     if (progress.isShowing()) {
                         progress.dismiss();
