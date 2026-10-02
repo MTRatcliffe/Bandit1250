@@ -139,7 +139,7 @@ public final class MainActivity extends Activity {
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("Bandit Monitor V0.8.0");
+        title.setText("Bandit Monitor V0.9.0");
         title.setTextSize(20);
         title.setTypeface(null, Typeface.BOLD);
         title.setSingleLine(true);
@@ -283,12 +283,27 @@ public final class MainActivity extends Activity {
         root.addView(decodedHead);
 
         decoded = text("Waiting for SDS data…");
-        decoded.setTextSize(14);
+        decoded.setTextSize(13);
         decoded.setTypeface(Typeface.MONOSPACE);
         decoded.setTextIsSelectable(true);
         root.addView(decoded);
 
-        TextView rawHead = text("Raw 2108 response");
+        // Three-column live table: variable, raw binary bytes, human conversion.
+        // Binary is intentionally used instead of hexadecimal so the wire values
+        // are readable at a glance without mentally converting hex.
+        liveTable = new TableLayout(this);
+        liveTable.setStretchAllColumns(true);
+        liveTable.setShrinkAllColumns(true);
+        liveTable.setPadding(0, dp(4), 0, dp(8));
+
+        TableRow liveHead = new TableRow(this);
+        liveHead.addView(tableCell("Variable", true, false));
+        liveHead.addView(tableCell("Raw (binary)", true, true));
+        liveHead.addView(tableCell("Converted", true, false));
+        liveTable.addView(liveHead);
+        root.addView(liveTable);
+
+        TextView rawHead = text("Raw 2108 response (hex, debug)");
         rawHead.setTextSize(16);
         rawHead.setTypeface(null, Typeface.BOLD);
         root.addView(rawHead);
@@ -841,20 +856,8 @@ public final class MainActivity extends Activity {
 
             lastEstimatedLph = estimatedLph;
 
-            decoded.setText(
-                    BanditDecoder.formatAll(d) +
-                    String.format(
-                            Locale.UK,
-                            "\n\nFuel model\n" +
-                            "Estimated flowing PW  %.3f ms\n" +
-                            "Estimated fuel        %.3f L/h",
-                            FuelCalculator.effectivePulseMs(
-                                    d.averageMs,
-                                    netLatencyMs
-                            ),
-                            estimatedLph
-                    )
-            );
+            decoded.setVisibility(View.GONE);
+            renderLiveDataTable(d);
 
             updateMpgPanel();
             addHistorySample(d.rpm, estimatedLph);
@@ -862,6 +865,7 @@ public final class MainActivity extends Activity {
         } catch (Exception e) {
             lastEstimatedLph = Double.NaN;
 
+            decoded.setVisibility(View.VISIBLE);
             decoded.setText(
                     "Decoder error: " + e.getMessage() +
                     "\nRaw frame remains available below."
@@ -869,6 +873,129 @@ public final class MainActivity extends Activity {
 
             updateMpgPanel();
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Live ECU data table
+    // ---------------------------------------------------------------------
+
+    private TextView tableCell(String value, boolean bold, boolean mono) {
+        TextView v = new TextView(this);
+        v.setText(value);
+        v.setTextSize(mono ? 10 : 11);
+        v.setPadding(dp(3), dp(5), dp(3), dp(5));
+        v.setGravity(Gravity.CENTER_VERTICAL);
+        if (bold) v.setTypeface(null, Typeface.BOLD);
+        if (mono) v.setTypeface(Typeface.MONOSPACE);
+        return v;
+    }
+
+    private void renderLiveDataTable(BanditLiveData d) {
+        if (liveTable == null) return;
+
+        // Preserve the header and replace the changing data rows.
+        while (liveTable.getChildCount() > 1) {
+            liveTable.removeViewAt(1);
+        }
+
+        addLiveRow("RPM", bin16(d.frame, 13, 14),
+                String.format(Locale.UK, "%d rpm", d.rpm));
+        addLiveRow("ECU speed", bin8(d.frame, 12),
+                String.format(Locale.UK, "%.0f km/h (est.)", d.ecuSpeedKph));
+        addLiveRow("TPS", bin8(d.frame, 15),
+                String.format(Locale.UK, "%.1f %% (est.)", d.tpsPct));
+        addLiveRow("IAP-1", bin8(d.frame, 16),
+                String.format(Locale.UK, "%.1f kPa (est.)", d.iap1Kpa));
+        addLiveRow("Coolant", bin8(d.frame, 17),
+                String.format(Locale.UK, "%.1f °C (est.)", d.engineTempC));
+        addLiveRow("Intake temp", bin8(d.frame, 18),
+                String.format(Locale.UK, "%.1f °C (est.)", d.intakeTempC));
+        addLiveRow("EAP", bin8(d.frame, 19), "unverified");
+        addLiveRow("Battery", bin8(d.frame, 20),
+                String.format(Locale.UK, "%.2f V (est.)", d.batteryEstV));
+
+        addLiveRow("O₂ sensor", bin8(d.frame, 21), o2Guess(d.o2Raw));
+
+        addLiveRow("Gear sensor", bin8(d.frame, 22),
+                String.format(Locale.UK, "%d raw", d.gearRaw));
+        addLiveRow("IAP-2", bin8(d.frame, 23),
+                String.format(Locale.UK, "%.1f kPa (est.)", d.iap2Kpa));
+
+        double desiredIdleRpm = d.idleSpeedRaw * 12.5;
+        addLiveRow("Desired idle", bin8(d.frame, 24),
+                String.format(Locale.UK, "~%.0f rpm (est.)", desiredIdleRpm));
+
+        addLiveRow("ISC position", bin8(d.frame, 25),
+                String.format(Locale.UK, "%d raw", d.iscRaw));
+
+        addLiveRow("Injector 1", bin16(d.frame, 27, 28),
+                String.format(Locale.UK, "%.3f ms", d.inj1));
+        addLiveRow("Injector 2", bin16(d.frame, 29, 30),
+                String.format(Locale.UK, "%.3f ms", d.inj2));
+        addLiveRow("Injector 3", bin16(d.frame, 31, 32),
+                String.format(Locale.UK, "%.3f ms", d.inj3));
+        addLiveRow("Injector 4", bin16(d.frame, 33, 34),
+                String.format(Locale.UK, "%.3f ms", d.inj4));
+        addLiveRow("Injector avg", "—",
+                String.format(Locale.UK, "%.3f ms", d.averageMs));
+
+        addLiveRow("Ignition 1", bin8(d.frame, 37),
+                formatMaybeValue(d.ign1Deg, "°"));
+        addLiveRow("Ignition 2", bin8(d.frame, 38),
+                formatMaybeValue(d.ign2Deg, "°"));
+        addLiveRow("Ignition 3", bin8(d.frame, 39),
+                formatMaybeValue(d.ign3Deg, "°"));
+        addLiveRow("Ignition 4", bin8(d.frame, 40),
+                formatMaybeValue(d.ign4Deg, "°"));
+        addLiveRow("Secondary TPS", bin8(d.frame, 42),
+                formatMaybeValue(d.secondaryTpsPct, "%"));
+
+        addLiveRow("Status 45", bin8(d.frame, 45), "state byte");
+        addLiveRow("Cooling fan", bin8(d.frame, 46), "state byte");
+        addLiveRow("Exhaust valve", bin8(d.frame, 47), "state byte");
+        addLiveRow("Clutch/starter", bin8(d.frame, 48), "state byte");
+        addLiveRow("Neutral", bin8(d.frame, 49), "state byte");
+    }
+
+    private void addLiveRow(String name, String rawBinary, String converted) {
+        TableRow row = new TableRow(this);
+        row.addView(tableCell(name, false, false));
+        row.addView(tableCell(rawBinary, false, true));
+        row.addView(tableCell(converted, false, false));
+        liveTable.addView(row);
+    }
+
+    private String o2Guess(int rawValue) {
+        // Provisional narrow-band interpretation from Suzuki SDS reverse-
+        // engineering. 0xFF is commonly an unavailable/not-valid sentinel in
+        // this data block and must not be interpreted as "very rich".
+        if (rawValue < 0 || rawValue == 255) return "N/A";
+        if (rawValue < 28) return "LEAN?";
+        if (rawValue > 28) return "RICH?";
+        return "CROSS?";
+    }
+
+    private String bin8(byte[] frame, int index) {
+        if (frame == null || index < 0 || index >= frame.length) return "—";
+        return bin8(frame[index] & 0xFF);
+    }
+
+    private String bin8(int value) {
+        String s = Integer.toBinaryString(value & 0xFF);
+        return "00000000".substring(s.length()) + s;
+    }
+
+    private String bin16(byte[] frame, int hi, int lo) {
+        if (frame == null || hi < 0 || lo < 0 ||
+                hi >= frame.length || lo >= frame.length) {
+            return "—";
+        }
+        return bin8(frame[hi] & 0xFF) + " " + bin8(frame[lo] & 0xFF);
+    }
+
+    private String formatMaybeValue(double value, String unit) {
+        if (!Double.isFinite(value)) return "—";
+        return String.format(Locale.UK, "%.1f %s (est.)", value, unit);
     }
 
     // ---------------------------------------------------------------------
