@@ -15,8 +15,9 @@ import java.util.*;
 /**
  * Fault-code and experimental ECU tools popup.
  *
- * The experimental memory reader is intentionally read-only. It only uses
- * KWP service 0x23 and does not send erase/write/download/programming commands.
+ * The experimental ECU discovery is intentionally conservative. It uses only
+ * read-only or deliberately non-state-changing KWP probes and never sends
+ * erase/write/download/programming-mode/actuator/routine/key commands.
  */
 public final class EcuToolsDialog {
     public interface SdsAction<T> {
@@ -96,22 +97,24 @@ public final class EcuToolsDialog {
         box.addView(experimentalHead);
 
         TextView warning = body(
-                "READ-ONLY experimental tool. It pauses normal live-data polling " +
-                "and probes standard KWP ReadMemoryByAddress (0x23). It does NOT " +
-                "send erase, write, download or flash commands.\n\n" +
-                "Keep ignition and battery voltage stable. Do not disconnect the " +
-                "Bluetooth adapter during a read. The Bandit may require a " +
-                "different flashing session/harness, so the probe may simply be rejected."
+                "Conservative experimental discovery tool. It pauses normal live-data " +
+                "polling and tries safe/read-only KWP paths: ECU ID reads, 0x23 memory " +
+                "reads, a security SEED request only, a non-state-changing 0x10 service " +
+                "presence probe, and ECU-to-tester 0x35 RequestUpload formats.\n\n" +
+                "It NEVER sends a security key, ECU reset, RequestDownload, erase/write, " +
+                "programming-session change, actuator control or routine command.\n\n" +
+                "Keep ignition and battery voltage stable and do not disconnect Bluetooth " +
+                "while the discovery pass is running."
         );
         box.addView(warning);
 
         probeRead = new Button(activity);
-        probeRead.setText("PROBE / READ ECU");
+        probeRead.setText("RUN SAFE ECU DISCOVERY");
         probeRead.setOnClickListener(v -> confirmProbe());
         box.addView(probeRead);
 
         experimentalResult = mono(
-                "No ECU memory probe performed yet."
+                "No ECU discovery pass performed yet."
         );
         box.addView(experimentalResult);
 
@@ -198,11 +201,13 @@ public final class EcuToolsDialog {
 
     private void confirmProbe() {
         new AlertDialog.Builder(activity)
-                .setTitle("Experimental read-only ECU probe")
+                .setTitle("Run safe ECU discovery?")
                 .setMessage(
-                        "This will pause live SDS polling and send only KWP " +
-                        "ReadMemoryByAddress (0x23) requests.\n\n" +
-                        "No erase or write commands are used. Continue?"
+                        "This pauses live SDS polling and runs only the conservative " +
+                        "read/read-discovery probes listed on this page.\n\n" +
+                        "No security key, ECU reset, programming-session change, " +
+                        "RequestDownload, write, erase, actuator or routine commands are sent.\n\n" +
+                        "Continue?"
                 )
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Continue", (d, which) -> startProbe())
@@ -212,40 +217,55 @@ public final class EcuToolsDialog {
     private void startProbe() {
         probeRead.setEnabled(false);
         experimentalResult.setText(
-                "Probing standard KWP memory-read formats at address 0x000000…"
+                "Running conservative ECU discovery…\n" +
+                "Live 21 08 polling is temporarily paused."
         );
 
         activity.runExclusiveSdsTask(
-                "ECU memory probe",
-                EcuMemoryReader::probe,
-                (probe, error) -> {
+                "safe ECU discovery",
+                EcuMemoryReader::safeDiscovery,
+                (discovery, error) -> {
                     probeRead.setEnabled(true);
 
                     if (error != null) {
                         experimentalResult.setText(
-                                "Probe failed:\n" + error.getMessage()
+                                "Discovery failed:\n" + error.getMessage()
                         );
                         return;
                     }
 
-                    if (probe == null || !probe.supported) {
+                    if (discovery == null) {
                         experimentalResult.setText(
-                                "Memory read not confirmed.\n\n" +
-                                (probe == null ? "" : probe.explanation + "\n\n" +
-                                        "Probe responses:\n" + probe.response)
+                                "Discovery returned no result."
                         );
                         return;
                     }
 
-                    experimentalResult.setText(
-                            "Memory read responded positively.\n" +
-                            "Address width: " + probe.addressBytes + " bytes\n" +
-                            "Usable block size: " + probe.blockSize + " bytes\n" +
-                            "Probe request: " + probe.request + "\n" +
-                            "Probe response: " + oneLine(probe.response)
-                    );
+                    experimentalResult.setText(discovery.report);
 
-                    chooseDumpSize(probe);
+                    // Preserve the existing full .bin path if direct 0x23
+                    // memory access turns out to work on a different ECU/session.
+                    if (discovery.directMemory != null &&
+                            discovery.directMemory.supported) {
+                        chooseDumpSize(discovery.directMemory);
+                        return;
+                    }
+
+                    if (discovery.uploadAccepted) {
+                        String message = discovery.uploadDataReturned
+                                ? "A read-only 0x35/0x36 upload path returned data. " +
+                                  "The raw discovery report above tells us which request worked. " +
+                                  "Full .bin reconstruction via that path is not automated yet."
+                                : "The ECU accepted RequestUpload, but the tiny TransferData " +
+                                  "format was not confirmed. The raw responses above give us " +
+                                  "the next protocol clue.";
+
+                        new AlertDialog.Builder(activity)
+                                .setTitle("Promising ECU upload response")
+                                .setMessage(message)
+                                .setPositiveButton("OK", null)
+                                .show();
+                    }
                 }
         );
     }
