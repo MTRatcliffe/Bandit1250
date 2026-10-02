@@ -7,13 +7,19 @@ import java.util.*;
 /**
  * Experimental READ-ONLY KWP2000 ECU memory reader.
  *
- * This class deliberately sends only service 0x23 (ReadMemoryByAddress).
- * It does not change diagnostic sessions, request security access, erase,
- * download, transfer-to-ECU or write memory.
+ * This class deliberately avoids destructive or state-changing programming
+ * operations. The safe discovery pass may:
+ * - read ECU identification records (0x1A)
+ * - request a security seed only (0x27 odd request; NEVER sends a key)
+ * - test whether DiagnosticSessionControl exists using an intentionally
+ *   incomplete request (no diagnostic mode is selected)
+ * - try read-only ReadMemoryByAddress (0x23)
+ * - try ECU-to-tester RequestUpload (0x35) formats and, only after a positive
+ *   upload response, one tiny TransferData read before RequestTransferExit.
  *
- * Suzuki/Denso flashing protocol details vary by ECU. We therefore probe a
- * few standard KWP address widths at address 0 and only continue if the ECU
- * gives a positive 0x63 response. A completed .bin is created only if every
+ * It NEVER sends ECU reset, programming-session changes, RequestDownload,
+ * writes, erase commands, actuator controls, routines or guessed security keys.
+ * A completed .bin is created only from confirmed 0x23 reads and only if every
  * requested byte was read successfully.
  */
 public final class EcuMemoryReader {
@@ -46,6 +52,301 @@ public final class EcuMemoryReader {
             this.response = response;
             this.explanation = explanation;
         }
+    }
+
+    public static final class SafeDiscoveryResult {
+        public final ProbeResult directMemory;
+        public final boolean securitySeedSupported;
+        public final boolean uploadAccepted;
+        public final boolean uploadDataReturned;
+        public final String uploadRequest;
+        public final String report;
+
+        SafeDiscoveryResult(
+                ProbeResult directMemory,
+                boolean securitySeedSupported,
+                boolean uploadAccepted,
+                boolean uploadDataReturned,
+                String uploadRequest,
+                String report
+        ) {
+            this.directMemory = directMemory;
+            this.securitySeedSupported = securitySeedSupported;
+            this.uploadAccepted = uploadAccepted;
+            this.uploadDataReturned = uploadDataReturned;
+            this.uploadRequest = uploadRequest;
+            this.report = report;
+        }
+    }
+
+    /**
+     * Conservative automatic discovery pass.
+     *
+     * Every request here is either read-only or intentionally incomplete so it
+     * cannot select a new diagnostic mode. A positive RequestUpload is followed
+     * by at most one tiny TransferData request and RequestTransferExit.
+     */
+    public static SafeDiscoveryResult safeDiscovery(SuzukiSds sds)
+            throws IOException {
+        StringBuilder report = new StringBuilder();
+        report.append("SAFE ECU DISCOVERY\n");
+        report.append("No reset/write/erase/download/actuator/routine/key commands used.\n\n");
+
+        report.append("[1] ECU identification (read-only)\n");
+        String[] identRequests = {"1A90", "1A91", "1A92", "1A9B"};
+        for (String request : identRequests) {
+            appendProbe(report, sds, request, 0x1A, 4000);
+        }
+
+        report.append("\n[2] Security service — seed request ONLY\n");
+        String securityResponse = safeRequest(sds, "2701", 4500);
+        report.append("2701 -> ").append(oneLine(securityResponse)).append("\n");
+        String securityNrc = negativeResponseExplanation(securityResponse, 0x27);
+        if (securityNrc != null) {
+            report.append("    ").append(securityNrc).append("\n");
+        }
+        boolean securitySupported =
+                isPositiveService(securityResponse, 0x67);
+
+        if (securitySupported) {
+            report.append("    Seed response received. NO KEY WAS SENT.\n");
+        }
+
+        report.append("\n[3] Diagnostic-session service presence\n");
+        report.append("Intentionally incomplete 0x10 request; no mode is selected.\n");
+        String sessionResponse = safeRequest(sds, "10", 4000);
+        report.append("10 -> ").append(oneLine(sessionResponse)).append("\n");
+        String sessionNrc = negativeResponseExplanation(sessionResponse, 0x10);
+        if (sessionNrc != null) {
+            report.append("    ").append(sessionNrc).append("\n");
+        }
+
+        report.append("\n[4] ReadMemoryByAddress 0x23\n");
+        ProbeResult direct = probe(sds);
+        report.append(direct.response).append("\n");
+        report.append("    ").append(direct.explanation).append("\n");
+
+        report.append("\n[5] RequestUpload 0x35 (ECU -> tester only)\n");
+
+        UploadProbe upload = probeSafeUpload(sds, report);
+
+        report.append("\nRESULT\n");
+        if (direct.supported) {
+            report.append("0x23 direct memory read WORKS.\n");
+        } else {
+            report.append("0x23 direct memory read not available in this session.\n");
+        }
+
+        if (upload.accepted) {
+            report.append("0x35 RequestUpload accepted");
+            if (upload.request != null) {
+                report.append(" using ").append(upload.request);
+            }
+            report.append(".\n");
+
+            if (upload.dataReturned) {
+                report.append("0x36 returned upload data: promising read path found.\n");
+            } else {
+                report.append("Upload started, but the tiny 0x36 transfer format is not yet confirmed.\n");
+            }
+        } else {
+            report.append("No tested safe 0x35 upload format was accepted.\n");
+        }
+
+        if (securitySupported) {
+            report.append("SecurityAccess seed request is supported; no unlock was attempted.\n");
+        }
+
+        return new SafeDiscoveryResult(
+                direct,
+                securitySupported,
+                upload.accepted,
+                upload.dataReturned,
+                upload.request,
+                report.toString().trim()
+        );
+    }
+
+    private static final class UploadProbe {
+        boolean accepted;
+        boolean dataReturned;
+        String request;
+    }
+
+    private static UploadProbe probeSafeUpload(
+            SuzukiSds sds,
+            StringBuilder report
+    ) {
+        UploadProbe result = new UploadProbe();
+
+        ArrayList<String> candidates = new ArrayList<>();
+
+        // Parameters are optional in ISO 14230, so try a bare request first.
+        candidates.add("35");
+
+        // Common manufacturer-specific shapes: address followed by a tiny
+        // byte-count. Every candidate requests only ONE byte from address zero.
+        int[] addressWidths = {2, 3, 4};
+        int[] lengthWidths = {1, 2, 3, 4};
+
+        for (int addressBytes : addressWidths) {
+            for (int lengthBytes : lengthWidths) {
+                candidates.add(
+                        "35" +
+                        zeroBytes(addressBytes) +
+                        unsignedFixed(1L, lengthBytes)
+                );
+            }
+        }
+
+        // UDS-style dataFormatIdentifier + address/length-format byte is also
+        // used by some later KWP-derived implementations. Still upload/read only.
+        for (int addressBytes : addressWidths) {
+            for (int lengthBytes : lengthWidths) {
+                int alfid = ((lengthBytes & 0x0F) << 4) |
+                        (addressBytes & 0x0F);
+
+                candidates.add(
+                        "3500" +
+                        String.format(Locale.US, "%02X", alfid) +
+                        zeroBytes(addressBytes) +
+                        unsignedFixed(1L, lengthBytes)
+                );
+            }
+        }
+
+        for (String request : candidates) {
+            String response = safeRequest(sds, request, 5000);
+
+            report.append(request)
+                    .append(" -> ")
+                    .append(oneLine(response))
+                    .append("\n");
+
+            String nrc = negativeResponseExplanation(response, 0x35);
+            if (nrc != null) {
+                report.append("    ").append(nrc).append("\n");
+
+                // Explicit service-not-supported means format changes cannot
+                // make 0x35 work in this session, so stop the upload sweep.
+                if (nrc.startsWith("NRC 0x11")) {
+                    break;
+                }
+            }
+
+            if (!isPositiveService(response, 0x75)) {
+                continue;
+            }
+
+            result.accepted = true;
+            result.request = request;
+
+            report.append("    Positive 0x75 RequestUpload response.\n");
+            report.append("    Trying one tiny read-only TransferData request…\n");
+
+            try {
+                String transfer = safeRequest(sds, "36", 5000);
+                report.append("36 -> ")
+                        .append(oneLine(transfer))
+                        .append("\n");
+
+                if (!isPositiveService(transfer, 0x76)) {
+                    String transferNrc =
+                            negativeResponseExplanation(transfer, 0x36);
+                    if (transferNrc != null) {
+                        report.append("    ")
+                                .append(transferNrc)
+                                .append("\n");
+                    }
+
+                    // Block sequence counter 1 is another common read-side
+                    // transfer form. Still no tester-to-ECU payload is sent.
+                    transfer = safeRequest(sds, "3601", 5000);
+                    report.append("3601 -> ")
+                            .append(oneLine(transfer))
+                            .append("\n");
+                }
+
+                result.dataReturned =
+                        isPositiveService(transfer, 0x76);
+
+                if (result.dataReturned) {
+                    report.append("    Positive 0x76 upload data response.\n");
+                }
+
+            } finally {
+                // Always attempt to leave any accepted upload transfer cleanly.
+                String exit = safeRequest(sds, "37", 5000);
+                report.append("37 (exit) -> ")
+                        .append(oneLine(exit))
+                        .append("\n");
+            }
+
+            // One accepted upload format is enough; do not keep changing formats.
+            break;
+        }
+
+        return result;
+    }
+
+    private static void appendProbe(
+            StringBuilder report,
+            SuzukiSds sds,
+            String request,
+            int service,
+            long timeoutMs
+    ) {
+        String response = safeRequest(sds, request, timeoutMs);
+
+        report.append(request)
+                .append(" -> ")
+                .append(oneLine(response))
+                .append("\n");
+
+        String nrc = negativeResponseExplanation(response, service);
+        if (nrc != null) {
+            report.append("    ").append(nrc).append("\n");
+        }
+    }
+
+    private static String safeRequest(
+            SuzukiSds sds,
+            String request,
+            long timeoutMs
+    ) {
+        try {
+            return sds.requestRaw(request + " 1", timeoutMs);
+        } catch (IOException e) {
+            return "I/O ERROR: " + e.getMessage();
+        }
+    }
+
+    private static boolean isPositiveService(String response, int service) {
+        if (response == null) return false;
+
+        String upper = response.toUpperCase(Locale.US);
+        if (upper.contains("NO DATA") ||
+                upper.contains("ERROR") ||
+                upper.contains("UNABLE") ||
+                upper.contains("STOPPED")) {
+            return false;
+        }
+
+        String hex = upper.replaceAll("[^0-9A-F]", "");
+        String marker = String.format(Locale.US, "%02X", service);
+
+        return hex.startsWith(marker) || hex.contains(marker);
+    }
+
+    private static String zeroBytes(int count) {
+        StringBuilder s = new StringBuilder(count * 2);
+        for (int i = 0; i < count; i++) s.append("00");
+        return s.toString();
+    }
+
+    private static String unsignedFixed(long value, int bytes) {
+        String format = "%0" + (bytes * 2) + "X";
+        return String.format(Locale.US, format, value);
     }
 
     public static final class ReadResult {
@@ -369,7 +670,18 @@ public final class EcuMemoryReader {
             case 0x33: meaning = "security access denied"; break;
             case 0x35: meaning = "invalid key"; break;
             case 0x36: meaning = "security attempts exceeded"; break;
+            case 0x37: meaning = "required time delay not expired"; break;
+            case 0x40: meaning = "download not accepted"; break;
+            case 0x50: meaning = "upload not accepted"; break;
+            case 0x71: meaning = "transfer suspended"; break;
+            case 0x72: meaning = "transfer aborted"; break;
+            case 0x74: meaning = "illegal address in block transfer"; break;
+            case 0x75: meaning = "illegal byte count in block transfer"; break;
+            case 0x76: meaning = "illegal block transfer type"; break;
+            case 0x77: meaning = "block transfer checksum error"; break;
             case 0x78: meaning = "response pending"; break;
+            case 0x79: meaning = "incorrect byte count during block transfer"; break;
+            case 0x80: meaning = "service not supported in active session"; break;
             default:
                 meaning = "negative response";
         }
