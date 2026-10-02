@@ -20,6 +20,15 @@ public final class SuzukiSds {
     public int getMissedFrames() { return missedFrames; }
     public int getRecoveryCount() { return recoveryCount; }
 
+    /**
+     * Send one raw KWP/SDS request through the already-initialised ECU session.
+     * Used by the fault-code and experimental read-only ECU tools.
+     */
+    public synchronized String requestRaw(String command, long timeoutMs)
+            throws IOException {
+        return run(command, timeoutMs);
+    }
+
     private String run(String command, long timeoutMs) throws IOException {
         logger.log("> " + command);
         String response = elm.command(command, timeoutMs);
