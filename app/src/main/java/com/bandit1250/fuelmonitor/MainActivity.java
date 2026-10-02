@@ -4,17 +4,20 @@ import android.Manifest;
 import android.app.*;
 import android.bluetooth.*;
 import android.content.SharedPreferences;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.location.*;
+import android.net.Uri;
 import android.os.*;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.view.*;
 import android.widget.*;
 
+import java.io.File;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -277,6 +280,11 @@ public final class MainActivity extends Activity {
         Button chartToggle = compactButton("📈");
         chartToggle.setContentDescription("Show or hide ECU charts");
         liveHeadRow.addView(chartToggle);
+
+        Button ecuTools = compactButton("⚠ ECU");
+        ecuTools.setContentDescription("Fault codes and ECU tools");
+        ecuTools.setOnClickListener(v -> new EcuToolsDialog(this).show());
+        liveHeadRow.addView(ecuTools);
 
         root.addView(liveHeadRow);
 
@@ -1200,6 +1208,88 @@ public final class MainActivity extends Activity {
         } else {
             super.onBackPressed();
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Exclusive SDS operations used by fault-code / ECU tools
+    // ---------------------------------------------------------------------
+
+    /**
+     * Temporarily stops the continuous 21 08 poll loop, runs one exclusive SDS
+     * operation on the same single I/O thread, then resumes live polling.
+     *
+     * This prevents diagnostic commands and ECU memory-read probes from being
+     * interleaved with live-data requests on the single K-Line connection.
+     */
+    <T> void runExclusiveSdsTask(
+            String label,
+            EcuToolsDialog.SdsAction<T> action,
+            EcuToolsDialog.SdsCallback<T> callback
+    ) {
+        if (sds == null || elm == null || !elm.isConnected()) {
+            ui.post(() -> callback.done(
+                    null,
+                    new IllegalStateException(
+                            "Connect to the Bandit ECU first."
+                    )
+            ));
+            return;
+        }
+
+        final boolean resumePolling = polling;
+
+        // Causes the existing pollLoop() task to finish after its current
+        // request. The task below is queued behind it on the same executor.
+        polling = false;
+        setStatusYellow("BT: OK • " + label + "…");
+
+        io.execute(() -> {
+            T result = null;
+            Exception failure = null;
+
+            try {
+                result = action.run(sds);
+            } catch (Exception e) {
+                failure = e;
+            }
+
+            final T finalResult = result;
+            final Exception finalFailure = failure;
+
+            ui.post(() -> callback.done(finalResult, finalFailure));
+
+            if (resumePolling &&
+                    sds != null &&
+                    elm != null &&
+                    elm.isConnected()) {
+                polling = true;
+                ui.post(this::updateConnectedStatus);
+
+                // Continue occupying the I/O worker exactly as the normal
+                // connection path does.
+                pollLoop();
+            }
+        });
+    }
+
+    void shareEcuBin(File file) {
+        if (file == null || !file.isFile()) {
+            toast("ECU .bin file is not available");
+            return;
+        }
+
+        Uri uri = ShareFileProvider.uriFor(this, file);
+
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("application/octet-stream");
+        send.putExtra(Intent.EXTRA_STREAM, uri);
+        send.putExtra(
+                Intent.EXTRA_SUBJECT,
+                "Bandit 1250 ECU dump " + file.getName()
+        );
+        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        startActivity(Intent.createChooser(send, "Share ECU .bin"));
     }
 
     // ---------------------------------------------------------------------
