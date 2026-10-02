@@ -57,6 +57,8 @@ public final class MainActivity extends Activity {
     private SharedPreferences prefs;
 
     private FrameLayout pageFrame;
+    private ScrollView mainScroll;
+    private DiagnosticsPanel diagnosticsPanel;
     private View mainPage;
     private View chartsPage;
     private HistoryChartsView chartsView;
@@ -128,7 +130,8 @@ public final class MainActivity extends Activity {
     }
 
     private View buildMainPage() {
-        ScrollView sv = new ScrollView(this);
+        mainScroll = new ScrollView(this);
+        ScrollView sv = mainScroll;
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -140,7 +143,7 @@ public final class MainActivity extends Activity {
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("Bandit Monitor V0.9.0");
+        title.setText("Bandit Monitor V0.10.0");
         title.setTextSize(20);
         title.setTypeface(null, Typeface.BOLD);
         title.setSingleLine(true);
@@ -165,7 +168,7 @@ public final class MainActivity extends Activity {
         infoText = text(
                 "2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 21 08\n" +
                 "CONNECT performs Bluetooth connection, SDS initialisation and continuous polling.\n" +
-                "Double-tap the MPG/Fuel box for live history charts.\n" +
+                "Tap 📈 beside Live ECU data to show/hide the full diagnostics chart stack.\n" +
                 "Tap ⚙ beside Fuel L/h to edit injector flow, dead time and calibration factor."
         );
         infoText.setVisibility(View.GONE);
@@ -256,32 +259,31 @@ public final class MainActivity extends Activity {
         gpsMeta.setGravity(Gravity.CENTER_HORIZONTAL);
         mpgPanel.addView(gpsMeta);
 
-        GestureDetector doubleTapDetector = new GestureDetector(
-                this,
-                new GestureDetector.SimpleOnGestureListener() {
-                    @Override public boolean onDown(MotionEvent e) {
-                        return true;
-                    }
-
-                    @Override public boolean onDoubleTap(MotionEvent e) {
-                        showCharts();
-                        return true;
-                    }
-                }
-        );
-
-        mpgPanel.setClickable(true);
-        mpgPanel.setOnTouchListener((v,event) ->
-                doubleTapDetector.onTouchEvent(event)
-        );
-
         root.addView(mpgPanel, panelParams);
 
-        // ----- SZ Viewer-style decoded live block -----
+        // ----- Live ECU data + expandable diagnostics charts -----
+        LinearLayout liveHeadRow = row();
+        liveHeadRow.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView decodedHead = text("Live ECU data");
         decodedHead.setTextSize(18);
         decodedHead.setTypeface(null, Typeface.BOLD);
-        root.addView(decodedHead);
+        liveHeadRow.addView(decodedHead, new LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+        ));
+
+        Button chartToggle = compactButton("📈");
+        chartToggle.setContentDescription("Show or hide ECU charts");
+        liveHeadRow.addView(chartToggle);
+
+        root.addView(liveHeadRow);
+
+        diagnosticsPanel = new DiagnosticsPanel(this, prefs, sv);
+        root.addView(diagnosticsPanel.getView());
+
+        chartToggle.setOnClickListener(v -> diagnosticsPanel.toggle());
 
         decoded = text("Waiting for SDS data…");
         decoded.setTextSize(13);
@@ -694,6 +696,7 @@ public final class MainActivity extends Activity {
         history.clear();
         lastHistorySampleMs = 0;
         lastPollDurationMs = -1;
+        if (diagnosticsPanel != null) diagnosticsPanel.resetSession();
 
         io.execute(() -> {
             boolean bluetoothConnected = false;
@@ -859,9 +862,9 @@ public final class MainActivity extends Activity {
 
             decoded.setVisibility(View.GONE);
             renderLiveDataTable(d);
+            if (diagnosticsPanel != null) diagnosticsPanel.addSample(d);
 
             updateMpgPanel();
-            addHistorySample(d.rpm, estimatedLph);
 
         } catch (Exception e) {
             lastEstimatedLph = Double.NaN;
