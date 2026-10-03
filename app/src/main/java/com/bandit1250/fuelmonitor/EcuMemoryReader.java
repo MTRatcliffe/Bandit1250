@@ -628,9 +628,20 @@ public final class EcuMemoryReader {
 
     public static final class DensoReadOnlyTestResult {
         public final String report;
+        public final String supported1A;
+        public final String supported21;
+        public final boolean normalSdsRestored;
 
-        DensoReadOnlyTestResult(String report) {
+        DensoReadOnlyTestResult(
+                String report,
+                String supported1A,
+                String supported21,
+                boolean normalSdsRestored
+        ) {
             this.report = report;
+            this.supported1A = supported1A;
+            this.supported21 = supported21;
+            this.normalSdsRestored = normalSdsRestored;
         }
     }
 
@@ -659,6 +670,7 @@ public final class EcuMemoryReader {
 
         report.append("\n[2] Suzuki/Denso ECU-identification local IDs 0x80..0x9F\n");
         int idHits = 0;
+        ArrayList<String> supported1A = new ArrayList<>();
 
         for (int id = 0x80; id <= 0x9F; id++) {
             String request = String.format(Locale.US, "1A%02X", id);
@@ -666,6 +678,7 @@ public final class EcuMemoryReader {
 
             if (isPositiveService(response, 0x5A)) {
                 idHits++;
+                supported1A.add(request);
                 report.append(request)
                         .append(" -> ")
                         .append(oneLine(response));
@@ -684,6 +697,7 @@ public final class EcuMemoryReader {
 
         report.append("\n[3] ReadDataByLocalIdentifier 0x21, IDs 00..1F\n");
         int localHits = 0;
+        ArrayList<String> supported21 = new ArrayList<>();
 
         for (int id = 0x00; id <= 0x1F; id++) {
             String request = String.format(Locale.US, "21%02X", id);
@@ -693,6 +707,7 @@ public final class EcuMemoryReader {
 
             if (hex.contains(positive)) {
                 localHits++;
+                supported21.add(request);
                 report.append(request)
                         .append(" -> ")
                         .append(oneLine(response))
@@ -726,7 +741,7 @@ public final class EcuMemoryReader {
                 "then try the known read-only 1A91 identifier.\n"
         );
 
-        probeKlineVariant(
+        boolean restore1 = probeKlineVariantIsolated(
                 report,
                 sds,
                 "KWP slow init @ 10400, init address 0x12",
@@ -735,7 +750,7 @@ public final class EcuMemoryReader {
                 true
         );
 
-        probeKlineVariant(
+        boolean restore2 = probeKlineVariantIsolated(
                 report,
                 sds,
                 "KWP slow init @ 9600, init address 0x12",
@@ -744,7 +759,7 @@ public final class EcuMemoryReader {
                 true
         );
 
-        probeKlineVariant(
+        boolean restore3 = probeKlineVariantIsolated(
                 report,
                 sds,
                 "KWP fast init @ 9600",
@@ -753,19 +768,11 @@ public final class EcuMemoryReader {
                 false
         );
 
-        report.append("\n[6] Restore normal Bandit SDS fast-init @ 10400\n");
+        boolean normalRestored = restore1 && restore2 && restore3;
 
-        try {
-            sds.initialise();
-            String restored = safeRequest(sds, "1A91", 4000);
-            report.append("Normal SDS restored. 1A91 -> ")
-                    .append(oneLine(restored))
-                    .append("\n");
-        } catch (IOException e) {
-            report.append("RESTORE ERROR: ")
-                    .append(e.getMessage())
-                    .append("\n");
-        }
+        report.append("\n[6] Final normal Bandit SDS verification @ 10400\n");
+        boolean finalRestore = restoreNormalSds(report, sds, "final restore");
+        normalRestored = normalRestored && finalRestore;
 
         report.append("\nINTERPRETATION\n");
         report.append(
@@ -778,10 +785,15 @@ public final class EcuMemoryReader {
                 "handshake that ELM cannot express or an additional ECU enable pin."
         );
 
-        return new DensoReadOnlyTestResult(report.toString().trim());
+        return new DensoReadOnlyTestResult(
+                report.toString().trim(),
+                String.join(", ", supported1A),
+                String.join(", ", supported21),
+                normalRestored
+        );
     }
 
-    private static void probeKlineVariant(
+    private static boolean probeKlineVariantIsolated(
             StringBuilder report,
             SuzukiSds sds,
             String label,
@@ -791,8 +803,18 @@ public final class EcuMemoryReader {
     ) {
         report.append("\n").append(label).append("\n");
 
+        // Every experiment starts from a freshly proven normal SDS state.
+        if (!restoreNormalSds(report, sds, "pre-test restore")) {
+            report.append("    Variant SKIPPED: normal SDS baseline could not be proven.\n");
+            return false;
+        }
+
         try {
+            // Close the active normal protocol before deliberately changing
+            // baud/init behaviour. This affects the adapter/link only.
             appendAt(report, sds, "ATPC", 2500);
+            pause(450);
+
             appendAt(report, sds, baudCommand, 2500);
             appendAt(report, sds, "ATIIA12", 2500);
             appendAt(report, sds, protocolCommand, 2500);
@@ -808,12 +830,10 @@ public final class EcuMemoryReader {
                     .append(oneLine(init))
                     .append("\n");
 
-            // If the adapter completed an init, try the same known-good,
-            // strictly read-only Suzuki ECU identifier.
             appendAt(report, sds, "ATSH8012F1", 2500);
 
             String id = safeRequest(sds, "1A91", 4000);
-            report.append("1A91 -> ")
+            report.append("Alternate-path 1A91 -> ")
                     .append(oneLine(id))
                     .append("\n");
 
@@ -822,9 +842,70 @@ public final class EcuMemoryReader {
             }
 
         } catch (Exception e) {
-            report.append("    Test error: ")
+            report.append("    Variant test error: ")
                     .append(e.getMessage())
                     .append("\n");
+        } finally {
+            report.append("Post-variant normal SDS recovery\n");
+        }
+
+        // Crucially, reset/reconfigure the ELM and prove the known-good
+        // Bandit 1A91 read BEFORE another variant is attempted.
+        return restoreNormalSds(report, sds, "post-test restore");
+    }
+
+    private static boolean restoreNormalSds(
+            StringBuilder report,
+            SuzukiSds sds,
+            String stage
+    ) {
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                try {
+                    sds.requestRaw("ATPC", 2200);
+                } catch (Exception ignored) {}
+
+                pause(attempt == 1 ? 500 : 1400);
+
+                // initialise() begins with ATZ and then runs the exact known-good
+                // Bandit ELM/SDS setup, including 10400-baud fast init.
+                sds.initialise();
+                pause(250);
+
+                String id = safeRequest(sds, "1A91", 4500);
+                report.append("    ")
+                        .append(stage)
+                        .append(" attempt ")
+                        .append(attempt)
+                        .append(": 1A91 -> ")
+                        .append(oneLine(id))
+                        .append("\n");
+
+                if (containsPositiveLocalIdentifier(id, 0x91)) {
+                    report.append("    Normal SDS PROVEN restored.\n");
+                    return true;
+                }
+
+            } catch (Exception e) {
+                report.append("    ")
+                        .append(stage)
+                        .append(" attempt ")
+                        .append(attempt)
+                        .append(" error: ")
+                        .append(e.getMessage())
+                        .append("\n");
+            }
+        }
+
+        report.append("    WARNING: normal SDS was not proven restored at this stage.\n");
+        return false;
+    }
+
+    private static void pause(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
