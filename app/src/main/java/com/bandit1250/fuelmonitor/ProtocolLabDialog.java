@@ -28,6 +28,7 @@ public final class ProtocolLabDialog {
     private Button scan21;
     private Button scan22;
     private Button allReadOnly;
+    private Button a5Discovery;
 
     public ProtocolLabDialog(MainActivity activity) {
         this.activity = activity;
@@ -144,6 +145,25 @@ public final class ProtocolLabDialog {
                         .show()
         );
         box.addView(allReadOnly);
+
+        TextView a5Head = text("Suzuki/Denso proprietary active-control discovery");
+        a5Head.setTypeface(null, Typeface.BOLD);
+        a5Head.setPadding(0, dp(14), 0, dp(4));
+        box.addView(a5Head);
+
+        TextView a5Note = text(
+                "K8-era Denso firmware analysis identifies service 0xA5 as the active-control " +
+                "dispatcher. It is kept OUT of the manual read-only command field. The dedicated " +
+                "discovery panel scans A5 IDs 00..FF using deliberately incomplete A5 <ID> probes " +
+                "and never sends a complete known actuator payload."
+        );
+        a5Note.setTextSize(12);
+        box.addView(a5Note);
+
+        a5Discovery = new Button(activity);
+        a5Discovery.setText("A5 ACTIVE-CONTROL DISCOVERY");
+        a5Discovery.setOnClickListener(v -> new A5DiscoveryDialog(activity).show());
+        box.addView(a5Discovery);
 
         LinearLayout logButtons = new LinearLayout(activity);
         logButtons.setOrientation(LinearLayout.HORIZONTAL);
@@ -434,6 +454,7 @@ public final class ProtocolLabDialog {
         if (scan21 != null) scan21.setEnabled(!busy);
         if (scan22 != null) scan22.setEnabled(!busy);
         if (allReadOnly != null) allReadOnly.setEnabled(!busy);
+        if (a5Discovery != null) a5Discovery.setEnabled(!busy);
     }
 
     private String validateReadOnly(String value) {
