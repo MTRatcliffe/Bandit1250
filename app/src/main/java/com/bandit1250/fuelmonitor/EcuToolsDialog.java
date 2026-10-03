@@ -127,9 +127,9 @@ public final class EcuToolsDialog {
         box.addView(engineHead);
 
         TextView engineNote = body(
-                "Uses the Suzuki/Denso candidate DTC requests identified from related tooling: " +
-                "18 00 00 00 for read and, only after confirmation, 14 00 00 for clear. " +
-                "Raw ECU responses are always shown and logged."
+                "Bike-tested DTC commands: 18 00 00 00 returned positive 58 00, " +
+                "and 14 00 00 returned positive 54 00 00. Raw ECU responses are " +
+                "always shown and logged."
         );
         box.addView(engineNote);
 
@@ -171,13 +171,11 @@ public final class EcuToolsDialog {
         box.addView(actuatorHead);
 
         TextView actuatorNote = body(
-                "First checks standard KWP2000 I/O-control with 30 00 01 " +
-                "(Report Current State). If the ECU returns 7F 30 11, service 0x30 itself " +
-                "is unsupported in this SDS session, so the app stops instead of sending " +
-                "another 255 meaningless IDs.\n\n" +
-                "Only if service 0x30 is recognised does it continue across local IDs 0x00..0xFF. " +
+                "Sweeps every local identifier 0x00..0xFF with 30 XX 01 " +
+                "(Report Current State), even if NRC 0x11 repeats. This deliberately checks " +
+                "for any ID-specific exception instead of stopping after the first reply.\n\n" +
                 "It does NOT send 0x00 Return Control, 0x07 Short Term Adjustment, " +
-                "an actuator state/value, or any command intended to move/switch an output."
+                "an output state/value, or any request intended to move/switch an output."
         );
         box.addView(actuatorNote);
 
@@ -321,11 +319,11 @@ public final class EcuToolsDialog {
         new AlertDialog.Builder(activity)
                 .setTitle("Probe standard KWP 0x30 without actuating?")
                 .setMessage(
-                        "This pauses live SDS polling and first sends 30 00 01 only. Under KWP2000, " +
-                        "0x01 means Report Current State. If the ECU returns NRC 0x11, the " +
-                        "standard 0x30 service is rejected and the test stops there.\n\n" +
-                        "If service 0x30 is recognised, the app continues the local-ID sweep. " +
-                        "It NEVER sends 0x00, 0x07 or an actuator state/value.\n\nContinue?"
+                        "This pauses live SDS polling and sends 30 XX 01 for every local ID " +
+                        "from 0x00 through 0xFF. Under KWP2000, 0x01 means Report Current State. " +
+                        "The sweep continues even if NRC 0x11 repeats, so we can rule out an " +
+                        "ID-specific exception from the bike itself.\n\n" +
+                        "It NEVER sends 0x00, 0x07 or an output state/value.\n\nContinue?"
                 )
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Scan", (d, which) -> startActuatorIdScan())
@@ -336,9 +334,9 @@ public final class EcuToolsDialog {
         setExperimentalBusy(true);
 
         actuatorResult.setText(
-                "Checking standard KWP 0x30 service…\n" +
-                "First request: 30 00 01 (Report Current State ONLY)\n" +
-                "If recognised, local-ID sweep will continue."
+                "Scanning all KWP 0x30 local IDs…\n" +
+                "Request: 30 XX 01 (Report Current State ONLY)\n" +
+                "0 / 256 IDs"
         );
 
         activity.runExclusiveSdsTask(
@@ -350,9 +348,9 @@ public final class EcuToolsDialog {
                                     if (actuatorResult != null) {
                                         actuatorResult.setText(String.format(
                                                 Locale.UK,
-                                                "KWP 0x30 report-only probe\n" +
+                                                "KWP 0x30 full report-only sweep\n" +
                                                 "%d / %d requests  •  current ID 0x%02X\n" +
-                                                "Stops immediately on service-level NRC 0x11.",
+                                                "Continues through 0xFF even when NRC 0x11 repeats.",
                                                 done,
                                                 total,
                                                 localId & 0xFF
