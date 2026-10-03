@@ -671,8 +671,8 @@ public final class EcuMemoryReader {
     ) throws IOException {
         StringBuilder report = new StringBuilder();
 
-        report.append("KWP 0x30 ACTUATOR-ID DISCOVERY — REPORT ONLY\n");
-        report.append("Sweeps local IDs 00..FF using ONLY 30 XX 01.\n");
+        report.append("KWP 0x30 SERVICE / ID PROBE — REPORT ONLY\n");
+        report.append("First tests 30 00 01; sweeps further IDs only if service 0x30 is recognised.\n");
         report.append("0x01 = Report Current State. No 0x00/0x07/state-changing request is sent.\n\n");
 
         // Prove the normal Suzuki SDS link before touching service 0x30.
@@ -730,8 +730,8 @@ public final class EcuMemoryReader {
                             oneLine(response)
                     ));
                     report.append(
-                            "ECU returned NRC 0x11 (service not supported); " +
-                            "remaining local IDs were not sent.\n"
+                            "ECU returned NRC 0x11: standard KWP service 0x30 itself is not supported " +
+                            "in this server/session. Remaining local IDs were intentionally not sent.\n"
                     );
 
                     if (progress != null) {
@@ -967,23 +967,40 @@ public final class EcuMemoryReader {
                 true
         );
 
-        boolean restore2 = probeKlineVariantIsolated(
-                report,
-                sds,
-                "KWP slow init @ 9600, init address 0x12",
-                "ATIB96",
-                "ATTP4",
-                true
-        );
+        boolean restore2 = false;
+        boolean restore3 = false;
 
-        boolean restore3 = probeKlineVariantIsolated(
-                report,
-                sds,
-                "KWP fast init @ 9600",
-                "ATIB96",
-                "ATTP5",
-                false
-        );
+        if (restore1) {
+            restore2 = probeKlineVariantIsolated(
+                    report,
+                    sds,
+                    "KWP slow init @ 9600, init address 0x12",
+                    "ATIB96",
+                    "ATTP4",
+                    true
+            );
+        } else {
+            report.append(
+                    "\nFurther alternate-init variants SKIPPED because normal SDS " +
+                    "could not be proven restored after the first variant.\n"
+            );
+        }
+
+        if (restore1 && restore2) {
+            restore3 = probeKlineVariantIsolated(
+                    report,
+                    sds,
+                    "KWP fast init @ 9600",
+                    "ATIB96",
+                    "ATTP5",
+                    false
+            );
+        } else if (restore1) {
+            report.append(
+                    "\nFinal alternate-init variant SKIPPED because normal SDS " +
+                    "could not be proven restored after the second variant.\n"
+            );
+        }
 
         boolean normalRestored = restore1 && restore2 && restore3;
 
@@ -1114,7 +1131,30 @@ public final class EcuMemoryReader {
             }
         }
 
-        report.append("    WARNING: normal SDS was not proven restored at this stage.\n");
+        report.append("    Normal ATZ/re-init attempts failed; trying hard transport recovery.\n");
+
+        try {
+            if (sds.recoverKnownGoodSession()) {
+                String id = safeRequest(sds, "1A91", 4500);
+                report.append("    hard recovery: 1A91 -> ")
+                        .append(oneLine(id))
+                        .append("\n");
+
+                if (containsPositiveLocalIdentifier(id, 0x91)) {
+                    report.append("    Normal SDS PROVEN restored after hard reconnect.\n");
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            report.append("    hard recovery error: ")
+                    .append(e.getMessage())
+                    .append("\n");
+        }
+
+        report.append(
+                "    WARNING: normal SDS was not proven restored. " +
+                "Stop alternate-init testing and cycle ignition/adapter power before continuing.\n"
+        );
         return false;
     }
 
