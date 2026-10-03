@@ -18,7 +18,7 @@ import java.util.*;
  *
  * The experimental ECU discovery is intentionally conservative. It uses only
  * read-only or deliberately non-state-changing KWP probes and never sends
- * erase/write/download/programming-mode/actuator/routine/key commands.
+ * erase/write/download/programming-mode/state-changing actuator/routine/key commands.
  */
 public final class EcuToolsDialog {
     public interface SdsAction<T> {
@@ -39,10 +39,12 @@ public final class EcuToolsDialog {
     private Button probeRead;
     private Button elmLengthTest;
     private Button densoReadOnlyTest;
+    private Button actuatorIdScan;
     private Button profileRefresh;
     private Button protocolLab;
     private Button shareProtocolLog;
     private TextView profileSummary;
+    private TextView actuatorResult;
 
     public EcuToolsDialog(MainActivity activity) {
         this.activity = activity;
@@ -153,6 +155,38 @@ public final class EcuToolsDialog {
         );
         absNote.setPadding(0, dp(10), 0, dp(14));
         box.addView(absNote);
+
+        View actuatorDivider = new View(activity);
+        actuatorDivider.setBackgroundColor(Color.rgb(170, 170, 170));
+        box.addView(actuatorDivider, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(1)
+        ));
+
+        TextView actuatorHead = heading(
+                "⚙ Actuator discovery — REPORT ONLY"
+        );
+        actuatorHead.setPadding(0, dp(14), 0, dp(4));
+        box.addView(actuatorHead);
+
+        TextView actuatorNote = body(
+                "Scans every KWP2000 I/O-control local identifier from 0x00 to 0xFF " +
+                "using ONLY 30 XX 01 (Report Current State).\n\n" +
+                "It does NOT send 0x00 Return Control, 0x07 Short Term Adjustment, " +
+                "an actuator state/value, or any command intended to move/switch an output. " +
+                "Positive 0x70 responses are only candidate controllable IDs until their " +
+                "physical function is identified."
+        );
+        box.addView(actuatorNote);
+
+        actuatorIdScan = new Button(activity);
+        actuatorIdScan.setText("⚙ ACTUATOR ID SCAN");
+        actuatorIdScan.setOnClickListener(v -> confirmActuatorIdScan());
+        box.addView(actuatorIdScan);
+
+        actuatorResult = mono(actuatorProfileSummary());
+        actuatorResult.setPadding(0, dp(4), 0, dp(12));
+        box.addView(actuatorResult);
 
         View divider = new View(activity);
         divider.setBackgroundColor(Color.rgb(170, 170, 170));
@@ -279,6 +313,132 @@ public final class EcuToolsDialog {
                     }
                 }
         );
+    }
+
+    private void confirmActuatorIdScan() {
+        new AlertDialog.Builder(activity)
+                .setTitle("Scan actuator local IDs without actuating?")
+                .setMessage(
+                        "This pauses live SDS polling and scans local identifiers 0x00 through " +
+                        "0xFF with KWP request 30 XX 01 only. Under KWP2000, control parameter " +
+                        "0x01 means Report Current State.\n\n" +
+                        "The scan NEVER sends 0x00, 0x07 or an actuator state/value. " +
+                        "Depending on ECU response time, a complete 256-ID sweep may take " +
+                        "a few minutes.\n\nContinue?"
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Scan", (d, which) -> startActuatorIdScan())
+                .show();
+    }
+
+    private void startActuatorIdScan() {
+        setExperimentalBusy(true);
+
+        actuatorResult.setText(
+                "Scanning KWP 0x30 local IDs…\n" +
+                "Request: 30 XX 01 (Report Current State ONLY)\n" +
+                "0 / 256 IDs"
+        );
+
+        activity.runExclusiveSdsTask(
+                "non-actuating 0x30 actuator ID scan",
+                sds -> EcuMemoryReader.scanActuatorLocalIds(
+                        sds,
+                        (done, total, localId) ->
+                                activity.runOnUiThread(() -> {
+                                    if (actuatorResult != null) {
+                                        actuatorResult.setText(String.format(
+                                                Locale.UK,
+                                                "Scanning KWP 0x30 local IDs…\n" +
+                                                "Request: 30 XX 01 (Report Current State ONLY)\n" +
+                                                "%d / %d IDs  •  current 0x%02X",
+                                                done,
+                                                total,
+                                                localId & 0xFF
+                                        ));
+                                    }
+                                })
+                ),
+                (result, error) -> {
+                    setExperimentalBusy(false);
+
+                    if (error != null) {
+                        actuatorResult.setText(
+                                "Actuator-ID scan failed:\n" + error.getMessage()
+                        );
+                        return;
+                    }
+
+                    if (result == null) {
+                        actuatorResult.setText(
+                                "Actuator-ID scan returned no result."
+                        );
+                        return;
+                    }
+
+                    prefs().edit()
+                            .putInt(
+                                    "ecu_profile_actuator_scan_count",
+                                    result.scannedIds
+                            )
+                            .putInt(
+                                    "ecu_profile_actuator_positive_count",
+                                    result.positiveIds
+                            )
+                            .putString(
+                                    "ecu_profile_actuator_ids",
+                                    result.supportedIds
+                            )
+                            .putBoolean(
+                                    "ecu_profile_actuator_service_unsupported",
+                                    result.serviceUnsupported
+                            )
+                            .putLong(
+                                    "ecu_profile_actuator_updated",
+                                    System.currentTimeMillis()
+                            )
+                            .apply();
+
+                    actuatorResult.setText(result.report);
+                    updateProfileSummary();
+                }
+        );
+    }
+
+    private String actuatorProfileSummary() {
+        SharedPreferences p = prefs();
+
+        if (!p.contains("ecu_profile_actuator_scan_count")) {
+            return "No non-actuating 0x30 local-ID scan performed yet.";
+        }
+
+        int scanned = p.getInt("ecu_profile_actuator_scan_count", 0);
+        int positives = p.getInt("ecu_profile_actuator_positive_count", 0);
+        String ids = p.getString("ecu_profile_actuator_ids", "");
+        boolean unsupported = p.getBoolean(
+                "ecu_profile_actuator_service_unsupported",
+                false
+        );
+        long updated = p.getLong("ecu_profile_actuator_updated", 0L);
+
+        String when = updated == 0L
+                ? "unknown"
+                : new SimpleDateFormat(
+                        "yyyy-MM-dd HH:mm:ss",
+                        Locale.UK
+                ).format(new Date(updated));
+
+        if (unsupported) {
+            return "Last scan: service 0x30 reported unsupported in this SDS session.\n" +
+                    "IDs scanned before stop: " + scanned + " / 256\n" +
+                    "Updated: " + when;
+        }
+
+        return "Last scan: " + positives + " candidate actuator IDs from " +
+                scanned + " IDs scanned.\n" +
+                "Candidate IDs: " +
+                (ids == null || ids.isEmpty() ? "none" : "0x" + ids.replace(", ", ", 0x")) +
+                "\nUpdated: " + when;
     }
 
     private void confirmProbe() {
@@ -485,6 +645,7 @@ public final class EcuToolsDialog {
         if (probeRead != null) probeRead.setEnabled(!busy);
         if (elmLengthTest != null) elmLengthTest.setEnabled(!busy);
         if (densoReadOnlyTest != null) densoReadOnlyTest.setEnabled(!busy);
+        if (actuatorIdScan != null) actuatorIdScan.setEnabled(!busy);
         if (profileRefresh != null) profileRefresh.setEnabled(!busy);
         if (protocolLab != null) protocolLab.setEnabled(!busy);
         if (shareProtocolLog != null) shareProtocolLog.setEnabled(!busy);
@@ -580,6 +741,28 @@ public final class EcuToolsDialog {
         int firstQuestion = p.getInt("ecu_profile_first_question", 0);
         String ids1a = p.getString("ecu_profile_1a", "not tested");
         String ids21 = p.getString("ecu_profile_21", "not tested");
+        String actuatorCandidates;
+
+        if (p.contains("ecu_profile_actuator_positive_count")) {
+            int actuatorCount = p.getInt(
+                    "ecu_profile_actuator_positive_count",
+                    0
+            );
+            int actuatorScanned = p.getInt(
+                    "ecu_profile_actuator_scan_count",
+                    0
+            );
+            boolean actuatorUnsupported = p.getBoolean(
+                    "ecu_profile_actuator_service_unsupported",
+                    false
+            );
+
+            actuatorCandidates = actuatorUnsupported
+                    ? "service 0x30 unsupported"
+                    : actuatorCount + " candidates / " + actuatorScanned + " IDs scanned";
+        } else {
+            actuatorCandidates = "not tested";
+        }
 
         String restore;
         if (p.contains("ecu_profile_normal_restored")) {
@@ -610,6 +793,7 @@ public final class EcuToolsDialog {
                         : "not tested") + "\n" +
                 "Positive 0x1A IDs: " + ids1a + "\n" +
                 "Positive 0x21 IDs: " + ids21 + "\n" +
+                "0x30 actuator candidates: " + actuatorCandidates + "\n" +
                 "Normal SDS recovered after alternate init: " + restore + "\n" +
                 "Profile updated: " + when;
     }
