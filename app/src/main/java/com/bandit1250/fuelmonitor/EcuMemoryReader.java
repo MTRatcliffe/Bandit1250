@@ -18,7 +18,9 @@ import java.util.*;
  *   upload response, one tiny TransferData read before RequestTransferExit.
  *
  * It NEVER sends ECU reset, programming-session changes, RequestDownload,
- * writes, erase commands, actuator controls, routines or guessed security keys.
+ * writes, erase commands, state-changing actuator controls, routines or guessed security keys.
+ * The optional actuator-ID discovery uses only KWP 0x30 control parameter 0x01
+ * (Report Current State); it never sends 0x00 or 0x07.
  * A completed .bin is created only from confirmed 0x23 reads and only if every
  * requested byte was read successfully.
  */
@@ -624,6 +626,221 @@ public final class EcuMemoryReader {
 
         return response.trim().equals("?") ||
                 response.trim().endsWith("?");
+    }
+
+    public static final class ActuatorIdScanResult {
+        public final int scannedIds;
+        public final int positiveIds;
+        public final boolean serviceUnsupported;
+        public final String supportedIds;
+        public final String report;
+
+        ActuatorIdScanResult(
+                int scannedIds,
+                int positiveIds,
+                boolean serviceUnsupported,
+                String supportedIds,
+                String report
+        ) {
+            this.scannedIds = scannedIds;
+            this.positiveIds = positiveIds;
+            this.serviceUnsupported = serviceUnsupported;
+            this.supportedIds = supportedIds;
+            this.report = report;
+        }
+    }
+
+    /**
+     * Non-actuating discovery of KWP2000 Input/Output Control local identifiers.
+     *
+     * Every request is exactly:
+     *     30 XX 01
+     *
+     * where XX is swept from 0x00 through 0xFF and 0x01 is the ISO 14230
+     * "Report Current State" control parameter. This method deliberately NEVER
+     * sends 0x00 (return control) or 0x07 (short-term adjustment), nor any
+     * actuator state/value byte.
+     *
+     * A positive response beginning 70 XX is treated as evidence that the ECU
+     * recognises that I/O local identifier. It means "candidate controllable
+     * item", not that we yet know which physical actuator it maps to.
+     */
+    public static ActuatorIdScanResult scanActuatorLocalIds(
+            SuzukiSds sds,
+            Progress progress
+    ) throws IOException {
+        StringBuilder report = new StringBuilder();
+
+        report.append("KWP 0x30 ACTUATOR-ID DISCOVERY — REPORT ONLY\n");
+        report.append("Sweeps local IDs 00..FF using ONLY 30 XX 01.\n");
+        report.append("0x01 = Report Current State. No 0x00/0x07/state-changing request is sent.\n\n");
+
+        // Prove the normal Suzuki SDS link before touching service 0x30.
+        String baseline = safeRequest(sds, "1A91", 4000);
+        report.append("Baseline 1A91 -> ")
+                .append(oneLine(baseline))
+                .append("\n\n");
+
+        if (!containsPositiveLocalIdentifier(baseline, 0x91)) {
+            report.append(
+                    "ABORTED: normal Bandit SDS identity read was not proven, " +
+                    "so the 0x30 scan was not started."
+            );
+
+            return new ActuatorIdScanResult(
+                    0,
+                    0,
+                    false,
+                    "",
+                    report.toString().trim()
+            );
+        }
+
+        ArrayList<String> supported = new ArrayList<>();
+        LinkedHashMap<Integer, Integer> nrcCounts = new LinkedHashMap<>();
+        int noReplyOrOther = 0;
+        int scanned = 0;
+        boolean serviceUnsupported = false;
+
+        report.append("Positive candidates\n");
+
+        for (int id = 0x00; id <= 0xFF; id++) {
+            String request = String.format(Locale.US, "30%02X01", id);
+            String response = safeRequest(sds, request, 1800);
+            scanned++;
+
+            String hex = compactHex(response);
+            String positiveMarker = String.format(Locale.US, "70%02X", id);
+
+            // Check a negative response before looking for a positive marker.
+            int nrc = negativeResponseCode(response, 0x30);
+
+            if (nrc >= 0) {
+                nrcCounts.put(nrc, nrcCounts.getOrDefault(nrc, 0) + 1);
+
+                // NRC 0x11 means the entire 0x30 service is unsupported in this
+                // active server/session. Continuing another 255 IDs adds no
+                // information and unnecessarily hammers the K-Line.
+                if (nrc == 0x11) {
+                    serviceUnsupported = true;
+                    report.append(String.format(
+                            Locale.US,
+                            "30%02X01 -> %s\n",
+                            id,
+                            oneLine(response)
+                    ));
+                    report.append(
+                            "ECU returned NRC 0x11 (service not supported); " +
+                            "remaining local IDs were not sent.\n"
+                    );
+
+                    if (progress != null) {
+                        progress.onProgress(scanned, 256, id);
+                    }
+                    break;
+                }
+
+            } else if (hex.contains(positiveMarker)) {
+                String idText = String.format(Locale.US, "%02X", id);
+                supported.add(idText);
+
+                report.append("ID 0x")
+                        .append(idText)
+                        .append("   ")
+                        .append(request)
+                        .append(" -> ")
+                        .append(oneLine(response))
+                        .append("\n");
+
+            } else {
+                noReplyOrOther++;
+            }
+
+            if (progress != null) {
+                progress.onProgress(scanned, 256, id);
+            }
+
+            // A small gap is deliberately conservative and keeps the request
+            // stream comfortably separated even on clone ELM adapters.
+            pause(20);
+        }
+
+        report.append("\nSUMMARY\n");
+        report.append("IDs actually scanned: ")
+                .append(scanned)
+                .append(" / 256\n");
+        report.append("Positive 0x70 candidate IDs: ")
+                .append(supported.size())
+                .append("\n");
+
+        if (supported.isEmpty()) {
+            report.append("Candidate IDs: none\n");
+        } else {
+            report.append("Candidate IDs: 0x")
+                    .append(String.join(", 0x", supported))
+                    .append("\n");
+        }
+
+        if (!nrcCounts.isEmpty()) {
+            report.append("Negative-response counts:\n");
+            for (Map.Entry<Integer, Integer> entry : nrcCounts.entrySet()) {
+                report.append(String.format(
+                        Locale.US,
+                        "  NRC 0x%02X: %d\n",
+                        entry.getKey(),
+                        entry.getValue()
+                ));
+            }
+        }
+
+        if (noReplyOrOther > 0) {
+            report.append("No-reply / non-standard responses: ")
+                    .append(noReplyOrOther)
+                    .append("\n");
+        }
+
+        report.append("\nINTERPRETATION\n");
+
+        if (serviceUnsupported) {
+            report.append(
+                    "The engine ECU says service 0x30 is not supported in the current SDS session."
+            );
+        } else if (!supported.isEmpty()) {
+            report.append(
+                    "Each positive ID is a candidate Suzuki/Denso I/O-control local identifier. " +
+                    "This scan does NOT identify the physical actuator and does NOT prove that " +
+                    "0x07 short-term adjustment is accepted for that ID."
+            );
+        } else {
+            report.append(
+                    "No positive I/O-control local identifiers were found with the standard " +
+                    "Report Current State form in this session."
+            );
+        }
+
+        return new ActuatorIdScanResult(
+                scanned,
+                supported.size(),
+                serviceUnsupported,
+                String.join(", ", supported),
+                report.toString().trim()
+        );
+    }
+
+    private static int negativeResponseCode(String response, int service) {
+        if (response == null) return -1;
+
+        String hex = compactHex(response);
+        String marker = String.format(Locale.US, "7F%02X", service & 0xFF);
+        int p = hex.indexOf(marker);
+
+        if (p < 0 || p + 8 > hex.length()) return -1;
+
+        try {
+            return Integer.parseInt(hex.substring(p + 6, p + 8), 16);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     public static final class DensoReadOnlyTestResult {
