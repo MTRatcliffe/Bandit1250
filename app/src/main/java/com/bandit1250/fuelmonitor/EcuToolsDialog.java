@@ -127,8 +127,9 @@ public final class EcuToolsDialog {
         box.addView(engineHead);
 
         TextView engineNote = body(
-                "Reads the engine ECU using KWP/SDS. Raw ECU responses are " +
-                "shown as well as a provisional standard DTC decode."
+                "Uses the Suzuki/Denso candidate DTC requests identified from related tooling: " +
+                "18 00 00 00 for read and, only after confirmation, 14 00 00 for clear. " +
+                "Raw ECU responses are always shown and logged."
         );
         box.addView(engineNote);
 
@@ -164,23 +165,24 @@ public final class EcuToolsDialog {
         ));
 
         TextView actuatorHead = heading(
-                "⚙ Actuator discovery — REPORT ONLY"
+                "⚙ Standard KWP 0x30 probe — REPORT ONLY"
         );
         actuatorHead.setPadding(0, dp(14), 0, dp(4));
         box.addView(actuatorHead);
 
         TextView actuatorNote = body(
-                "Scans every KWP2000 I/O-control local identifier from 0x00 to 0xFF " +
-                "using ONLY 30 XX 01 (Report Current State).\n\n" +
+                "First checks standard KWP2000 I/O-control with 30 00 01 " +
+                "(Report Current State). If the ECU returns 7F 30 11, service 0x30 itself " +
+                "is unsupported in this SDS session, so the app stops instead of sending " +
+                "another 255 meaningless IDs.\n\n" +
+                "Only if service 0x30 is recognised does it continue across local IDs 0x00..0xFF. " +
                 "It does NOT send 0x00 Return Control, 0x07 Short Term Adjustment, " +
-                "an actuator state/value, or any command intended to move/switch an output. " +
-                "Positive 0x70 responses are only candidate controllable IDs until their " +
-                "physical function is identified."
+                "an actuator state/value, or any command intended to move/switch an output."
         );
         box.addView(actuatorNote);
 
         actuatorIdScan = new Button(activity);
-        actuatorIdScan.setText("⚙ ACTUATOR ID SCAN");
+        actuatorIdScan.setText("⚙ 0x30 SERVICE / ID PROBE");
         actuatorIdScan.setOnClickListener(v -> confirmActuatorIdScan());
         box.addView(actuatorIdScan);
 
@@ -246,11 +248,11 @@ public final class EcuToolsDialog {
 
     private void readDtcs() {
         setDtcBusy(true);
-        dtcResult.setText("Reading engine ECU fault codes…");
+        dtcResult.setText("Reading engine ECU fault codes…\nTX: 18 00 00 00");
 
         activity.runExclusiveSdsTask(
                 "DTC read",
-                sds -> sds.requestRaw("1802FF00 1", 5000),
+                sds -> sds.requestRaw("18000000 1", 5000),
                 (response, error) -> {
                     setDtcBusy(false);
 
@@ -278,11 +280,11 @@ public final class EcuToolsDialog {
 
     private void clearDtcs() {
         setDtcBusy(true);
-        dtcResult.setText("Clearing stored engine ECU fault codes…");
+        dtcResult.setText("Clearing stored engine ECU fault codes…\nTX: 14 00 00");
 
         activity.runExclusiveSdsTask(
                 "DTC clear",
-                sds -> sds.requestRaw("14FF00 1", 5000),
+                sds -> sds.requestRaw("140000 1", 5000),
                 (response, error) -> {
                     setDtcBusy(false);
 
@@ -317,14 +319,13 @@ public final class EcuToolsDialog {
 
     private void confirmActuatorIdScan() {
         new AlertDialog.Builder(activity)
-                .setTitle("Scan actuator local IDs without actuating?")
+                .setTitle("Probe standard KWP 0x30 without actuating?")
                 .setMessage(
-                        "This pauses live SDS polling and scans local identifiers 0x00 through " +
-                        "0xFF with KWP request 30 XX 01 only. Under KWP2000, control parameter " +
-                        "0x01 means Report Current State.\n\n" +
-                        "The scan NEVER sends 0x00, 0x07 or an actuator state/value. " +
-                        "Depending on ECU response time, a complete 256-ID sweep may take " +
-                        "a few minutes.\n\nContinue?"
+                        "This pauses live SDS polling and first sends 30 00 01 only. Under KWP2000, " +
+                        "0x01 means Report Current State. If the ECU returns NRC 0x11, the " +
+                        "standard 0x30 service is rejected and the test stops there.\n\n" +
+                        "If service 0x30 is recognised, the app continues the local-ID sweep. " +
+                        "It NEVER sends 0x00, 0x07 or an actuator state/value.\n\nContinue?"
                 )
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Scan", (d, which) -> startActuatorIdScan())
@@ -335,9 +336,9 @@ public final class EcuToolsDialog {
         setExperimentalBusy(true);
 
         actuatorResult.setText(
-                "Scanning KWP 0x30 local IDs…\n" +
-                "Request: 30 XX 01 (Report Current State ONLY)\n" +
-                "0 / 256 IDs"
+                "Checking standard KWP 0x30 service…\n" +
+                "First request: 30 00 01 (Report Current State ONLY)\n" +
+                "If recognised, local-ID sweep will continue."
         );
 
         activity.runExclusiveSdsTask(
@@ -349,9 +350,9 @@ public final class EcuToolsDialog {
                                     if (actuatorResult != null) {
                                         actuatorResult.setText(String.format(
                                                 Locale.UK,
-                                                "Scanning KWP 0x30 local IDs…\n" +
-                                                "Request: 30 XX 01 (Report Current State ONLY)\n" +
-                                                "%d / %d IDs  •  current 0x%02X",
+                                                "KWP 0x30 report-only probe\n" +
+                                                "%d / %d requests  •  current ID 0x%02X\n" +
+                                                "Stops immediately on service-level NRC 0x11.",
                                                 done,
                                                 total,
                                                 localId & 0xFF
