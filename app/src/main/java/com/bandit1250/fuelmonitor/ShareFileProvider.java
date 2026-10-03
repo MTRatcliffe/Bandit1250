@@ -12,15 +12,21 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 
 /**
- * Minimal read-only ContentProvider for sharing completed ECU .bin files.
+ * Minimal read-only ContentProvider for sharing completed ECU .bin files and
+ * protocol CSV logs.
  * Avoids file:// URIs and keeps the rest of the app dependency-free.
  */
 public final class ShareFileProvider extends ContentProvider {
     public static Uri uriFor(Context context, File file) {
+        String parent = file == null || file.getParentFile() == null
+                ? ""
+                : file.getParentFile().getName();
+
         return new Uri.Builder()
                 .scheme("content")
                 .authority(context.getPackageName() + ".files")
-                .appendPath(file.getName())
+                .appendPath(parent)
+                .appendPath(file == null ? "" : file.getName())
                 .build();
     }
 
@@ -29,14 +35,33 @@ public final class ShareFileProvider extends ContentProvider {
             throw new FileNotFoundException("Provider context unavailable");
         }
 
-        String name = uri.getLastPathSegment();
+        java.util.List<String> segments = uri.getPathSegments();
+
+        // Backward compatibility with v0.11-v0.13 ECU dump URIs.
+        String bucket;
+        String name;
+
+        if (segments.size() == 1) {
+            bucket = "ecu_dumps";
+            name = segments.get(0);
+        } else if (segments.size() == 2) {
+            bucket = segments.get(0);
+            name = segments.get(1);
+        } else {
+            throw new FileNotFoundException("Invalid share path");
+        }
+
+        if (!"ecu_dumps".equals(bucket) &&
+                !"protocol_logs".equals(bucket)) {
+            throw new FileNotFoundException("Share directory not allowed");
+        }
 
         if (name == null || name.isEmpty() ||
                 name.contains("/") || name.contains("\\")) {
             throw new FileNotFoundException("Invalid file name");
         }
 
-        File base = new File(getContext().getFilesDir(), "ecu_dumps");
+        File base = new File(getContext().getFilesDir(), bucket);
         File target = new File(base, name);
 
         try {
@@ -62,6 +87,10 @@ public final class ShareFileProvider extends ContentProvider {
     }
 
     @Override public String getType(Uri uri) {
+        String name = uri.getLastPathSegment();
+        if (name != null && name.toLowerCase(java.util.Locale.US).endsWith(".csv")) {
+            return "text/csv";
+        }
         return "application/octet-stream";
     }
 
