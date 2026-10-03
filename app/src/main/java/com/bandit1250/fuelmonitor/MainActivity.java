@@ -58,6 +58,7 @@ public final class MainActivity extends Activity {
     private double calibrationFactor = 1.000;
 
     private SharedPreferences prefs;
+    private ProtocolSessionLogger protocolLogger;
 
     private FrameLayout pageFrame;
     private ScrollView mainScroll;
@@ -98,6 +99,7 @@ public final class MainActivity extends Activity {
         super.onCreate(b);
 
         prefs = getSharedPreferences("bandit_monitor", MODE_PRIVATE);
+        protocolLogger = new ProtocolSessionLogger(this);
         injectorFlowCcMin = readDoublePref("injector_flow", 220.0);
         netLatencyMs = readDoublePref("net_latency", 0.600);
         calibrationFactor = readDoublePref("cal_factor", 1.000);
@@ -1248,9 +1250,24 @@ public final class MainActivity extends Activity {
             Exception failure = null;
 
             try {
+                if (protocolLogger != null) {
+                    protocolLogger.setOperation(label);
+                    sds.setTransactionListener(protocolLogger::record);
+                }
+
                 result = action.run(sds);
+
             } catch (Exception e) {
                 failure = e;
+
+            } finally {
+                try {
+                    sds.setTransactionListener(null);
+                } catch (Exception ignored) {}
+
+                if (protocolLogger != null) {
+                    protocolLogger.setOperation("");
+                }
             }
 
             final T finalResult = result;
@@ -1273,23 +1290,54 @@ public final class MainActivity extends Activity {
     }
 
     void shareEcuBin(File file) {
+        shareInternalFile(
+                file,
+                "application/octet-stream",
+                "Bandit 1250 ECU dump " + (file == null ? "" : file.getName()),
+                "Share ECU .bin"
+        );
+    }
+
+    File getProtocolLogFile() {
+        return protocolLogger == null ? null : protocolLogger.getFile();
+    }
+
+    void clearProtocolLog() {
+        if (protocolLogger != null) {
+            protocolLogger.clear();
+        }
+    }
+
+    void shareProtocolLog() {
+        File file = getProtocolLogFile();
+        shareInternalFile(
+                file,
+                "text/csv",
+                "Bandit 1250 protocol log " + (file == null ? "" : file.getName()),
+                "Share protocol CSV"
+        );
+    }
+
+    private void shareInternalFile(
+            File file,
+            String mimeType,
+            String subject,
+            String chooserTitle
+    ) {
         if (file == null || !file.isFile()) {
-            toast("ECU .bin file is not available");
+            toast("Share file is not available");
             return;
         }
 
         Uri uri = ShareFileProvider.uriFor(this, file);
 
         Intent send = new Intent(Intent.ACTION_SEND);
-        send.setType("application/octet-stream");
+        send.setType(mimeType);
         send.putExtra(Intent.EXTRA_STREAM, uri);
-        send.putExtra(
-                Intent.EXTRA_SUBJECT,
-                "Bandit 1250 ECU dump " + file.getName()
-        );
+        send.putExtra(Intent.EXTRA_SUBJECT, subject);
         send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
 
-        startActivity(Intent.createChooser(send, "Share ECU .bin"));
+        startActivity(Intent.createChooser(send, chooserTitle));
     }
 
     // ---------------------------------------------------------------------
