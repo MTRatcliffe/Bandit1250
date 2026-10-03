@@ -671,8 +671,8 @@ public final class EcuMemoryReader {
     ) throws IOException {
         StringBuilder report = new StringBuilder();
 
-        report.append("KWP 0x30 SERVICE / ID PROBE — REPORT ONLY\n");
-        report.append("First tests 30 00 01; sweeps further IDs only if service 0x30 is recognised.\n");
+        report.append("KWP 0x30 FULL ID SWEEP — REPORT ONLY\n");
+        report.append("Sweeps every local ID 00..FF using 30 XX 01.\n");
         report.append("0x01 = Report Current State. No 0x00/0x07/state-changing request is sent.\n\n");
 
         // Prove the normal Suzuki SDS link before touching service 0x30.
@@ -700,7 +700,6 @@ public final class EcuMemoryReader {
         LinkedHashMap<Integer, Integer> nrcCounts = new LinkedHashMap<>();
         int noReplyOrOther = 0;
         int scanned = 0;
-        boolean serviceUnsupported = false;
 
         report.append("Positive candidates\n");
 
@@ -718,27 +717,8 @@ public final class EcuMemoryReader {
             if (nrc >= 0) {
                 nrcCounts.put(nrc, nrcCounts.getOrDefault(nrc, 0) + 1);
 
-                // NRC 0x11 means the entire 0x30 service is unsupported in this
-                // active server/session. Continuing another 255 IDs adds no
-                // information and unnecessarily hammers the K-Line.
-                if (nrc == 0x11) {
-                    serviceUnsupported = true;
-                    report.append(String.format(
-                            Locale.US,
-                            "30%02X01 -> %s\n",
-                            id,
-                            oneLine(response)
-                    ));
-                    report.append(
-                            "ECU returned NRC 0x11: standard KWP service 0x30 itself is not supported " +
-                            "in this server/session. Remaining local IDs were intentionally not sent.\n"
-                    );
-
-                    if (progress != null) {
-                        progress.onProgress(scanned, 256, id);
-                    }
-                    break;
-                }
+                // Deliberately continue through all IDs, including after NRC 0x11,
+                // so the bike itself provides a complete ID-by-ID result.
 
             } else if (hex.contains(positiveMarker)) {
                 String idText = String.format(Locale.US, "%02X", id);
@@ -801,9 +781,13 @@ public final class EcuMemoryReader {
 
         report.append("\nINTERPRETATION\n");
 
+        int nrc11Count = nrcCounts.getOrDefault(0x11, 0);
+        boolean serviceUnsupported =
+                supported.isEmpty() && scanned == 256 && nrc11Count == 256;
+
         if (serviceUnsupported) {
             report.append(
-                    "The engine ECU says service 0x30 is not supported in the current SDS session."
+                    "All 256 IDs returned NRC 0x11; no ID-specific exception was found."
             );
         } else if (!supported.isEmpty()) {
             report.append(
