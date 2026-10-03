@@ -2,6 +2,7 @@ package com.bandit1250.fuelmonitor;
 
 import android.app.*;
 import android.content.DialogInterface;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.view.Gravity;
@@ -38,6 +39,10 @@ public final class EcuToolsDialog {
     private Button probeRead;
     private Button elmLengthTest;
     private Button densoReadOnlyTest;
+    private Button profileRefresh;
+    private Button protocolLab;
+    private Button shareProtocolLog;
+    private TextView profileSummary;
 
     public EcuToolsDialog(MainActivity activity) {
         this.activity = activity;
@@ -50,6 +55,71 @@ public final class EcuToolsDialog {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(18), dp(8), dp(18), dp(18));
         scroll.addView(box);
+
+        TextView profileHead = heading("ECU / adapter profile");
+        box.addView(profileHead);
+
+        profileSummary = mono(profileSummaryText());
+        box.addView(profileSummary);
+
+        LinearLayout profileButtons = row();
+
+        profileRefresh = new Button(activity);
+        profileRefresh.setText("REFRESH INFO");
+        profileRefresh.setOnClickListener(v -> refreshProfile());
+        profileButtons.addView(profileRefresh, weight());
+
+        protocolLab = new Button(activity);
+        protocolLab.setText("PROTOCOL LAB");
+        protocolLab.setOnClickListener(v -> new ProtocolLabDialog(activity).show());
+        profileButtons.addView(protocolLab, weight());
+
+        box.addView(profileButtons);
+
+        LinearLayout logButtons = row();
+
+        shareProtocolLog = new Button(activity);
+        shareProtocolLog.setText("SHARE PROTOCOL LOG");
+        shareProtocolLog.setOnClickListener(v -> activity.shareProtocolLog());
+        logButtons.addView(shareProtocolLog, weight());
+
+        Button clearProtocolLog = new Button(activity);
+        clearProtocolLog.setText("CLEAR LOG");
+        clearProtocolLog.setOnClickListener(v ->
+                new AlertDialog.Builder(activity)
+                        .setTitle("Clear protocol log?")
+                        .setMessage(
+                                "This clears the current CSV transaction log only. " +
+                                "It does not change the ECU."
+                        )
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Clear", (d, which) -> {
+                            activity.clearProtocolLog();
+                            Toast.makeText(
+                                    activity,
+                                    "Protocol log cleared",
+                                    Toast.LENGTH_SHORT
+                            ).show();
+                        })
+                        .show()
+        );
+        logButtons.addView(clearProtocolLog, weight());
+
+        box.addView(logButtons);
+
+        TextView profileNote = body(
+                "Profile results persist across app restarts. Experimental ECU-tool " +
+                "transactions are automatically written to the current CSV log."
+        );
+        profileNote.setPadding(0, dp(2), 0, dp(12));
+        box.addView(profileNote);
+
+        View profileDivider = new View(activity);
+        profileDivider.setBackgroundColor(Color.rgb(170, 170, 170));
+        box.addView(profileDivider, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(1)
+        ));
 
         TextView engineHead = heading("Engine ECU fault codes");
         box.addView(engineHead);
@@ -321,6 +391,25 @@ public final class EcuToolsDialog {
                                     ? "ELM length test returned no result."
                                     : result.report
                     );
+
+                    if (result != null) {
+                        SharedPreferences p = prefs();
+                        p.edit()
+                                .putInt(
+                                        "ecu_profile_max_tx",
+                                        result.largestEcuSeenBytes
+                                )
+                                .putInt(
+                                        "ecu_profile_first_question",
+                                        result.firstQuestionMarkBytes
+                                )
+                                .putLong(
+                                        "ecu_profile_updated",
+                                        System.currentTimeMillis()
+                                )
+                                .apply();
+                        updateProfileSummary();
+                    }
                 }
         );
     }
@@ -366,6 +455,28 @@ public final class EcuToolsDialog {
                                     ? "Denso compatibility test returned no result."
                                     : result.report
                     );
+
+                    if (result != null) {
+                        prefs().edit()
+                                .putString(
+                                        "ecu_profile_1a",
+                                        result.supported1A
+                                )
+                                .putString(
+                                        "ecu_profile_21",
+                                        result.supported21
+                                )
+                                .putBoolean(
+                                        "ecu_profile_normal_restored",
+                                        result.normalSdsRestored
+                                )
+                                .putLong(
+                                        "ecu_profile_updated",
+                                        System.currentTimeMillis()
+                                )
+                                .apply();
+                        updateProfileSummary();
+                    }
                 }
         );
     }
@@ -374,6 +485,164 @@ public final class EcuToolsDialog {
         if (probeRead != null) probeRead.setEnabled(!busy);
         if (elmLengthTest != null) elmLengthTest.setEnabled(!busy);
         if (densoReadOnlyTest != null) densoReadOnlyTest.setEnabled(!busy);
+        if (profileRefresh != null) profileRefresh.setEnabled(!busy);
+        if (protocolLab != null) protocolLab.setEnabled(!busy);
+        if (shareProtocolLog != null) shareProtocolLog.setEnabled(!busy);
+    }
+
+    private static final class ProfileRead {
+        final String adapter;
+        final String protocol;
+        final String ecuRaw;
+        final String ecuAscii;
+
+        ProfileRead(
+                String adapter,
+                String protocol,
+                String ecuRaw,
+                String ecuAscii
+        ) {
+            this.adapter = adapter;
+            this.protocol = protocol;
+            this.ecuRaw = ecuRaw;
+            this.ecuAscii = ecuAscii;
+        }
+    }
+
+    private void refreshProfile() {
+        profileRefresh.setEnabled(false);
+        profileSummary.setText("Refreshing adapter / ECU identity…");
+
+        activity.runExclusiveSdsTask(
+                "ECU profile refresh",
+                sds -> {
+                    String adapter = sds.requestRaw("ATI", 2500);
+                    String protocol = sds.requestRaw("ATDPN", 2500);
+                    String ecu = sds.requestRaw("1A91 1", 4500);
+
+                    return new ProfileRead(
+                            oneLine(adapter),
+                            oneLine(protocol),
+                            oneLine(ecu),
+                            extract1AAscii(ecu, 0x91)
+                    );
+                },
+                (info, error) -> {
+                    profileRefresh.setEnabled(true);
+
+                    if (error != null) {
+                        profileSummary.setText(
+                                profileSummaryText() +
+                                "\n\nRefresh error: " + error.getMessage()
+                        );
+                        return;
+                    }
+
+                    if (info != null) {
+                        prefs().edit()
+                                .putString("ecu_profile_adapter", info.adapter)
+                                .putString("ecu_profile_protocol", info.protocol)
+                                .putString("ecu_profile_id_raw", info.ecuRaw)
+                                .putString("ecu_profile_id_ascii", info.ecuAscii)
+                                .putLong(
+                                        "ecu_profile_updated",
+                                        System.currentTimeMillis()
+                                )
+                                .apply();
+                    }
+
+                    updateProfileSummary();
+                }
+        );
+    }
+
+    private SharedPreferences prefs() {
+        return activity.getSharedPreferences(
+                "bandit_monitor",
+                android.content.Context.MODE_PRIVATE
+        );
+    }
+
+    private void updateProfileSummary() {
+        if (profileSummary != null) {
+            profileSummary.setText(profileSummaryText());
+        }
+    }
+
+    private String profileSummaryText() {
+        SharedPreferences p = prefs();
+
+        String adapter = p.getString("ecu_profile_adapter", "not refreshed");
+        String protocol = p.getString("ecu_profile_protocol", "not refreshed");
+        String ecuAscii = p.getString("ecu_profile_id_ascii", "not refreshed");
+        String raw = p.getString("ecu_profile_id_raw", "not refreshed");
+        int maxTx = p.getInt("ecu_profile_max_tx", 0);
+        int firstQuestion = p.getInt("ecu_profile_first_question", 0);
+        String ids1a = p.getString("ecu_profile_1a", "not tested");
+        String ids21 = p.getString("ecu_profile_21", "not tested");
+
+        String restore;
+        if (p.contains("ecu_profile_normal_restored")) {
+            restore = p.getBoolean("ecu_profile_normal_restored", false)
+                    ? "yes"
+                    : "NO / not proven";
+        } else {
+            restore = "not tested";
+        }
+
+        long updated = p.getLong("ecu_profile_updated", 0L);
+        String when = updated == 0L
+                ? "never"
+                : new SimpleDateFormat(
+                        "yyyy-MM-dd HH:mm:ss",
+                        Locale.UK
+                ).format(new Date(updated));
+
+        return "Adapter: " + adapter + "\n" +
+                "ELM protocol: " + protocol + "\n" +
+                "ECU ID: " + ecuAscii + "\n" +
+                "1A91 raw: " + raw + "\n" +
+                "Tested TX payload: " +
+                (maxTx > 0 ? maxTx + " bytes" : "not tested") + "\n" +
+                "First local ?: " +
+                (firstQuestion > 0
+                        ? firstQuestion + " bytes"
+                        : "not tested") + "\n" +
+                "Positive 0x1A IDs: " + ids1a + "\n" +
+                "Positive 0x21 IDs: " + ids21 + "\n" +
+                "Normal SDS recovered after alternate init: " + restore + "\n" +
+                "Profile updated: " + when;
+    }
+
+    private String extract1AAscii(String response, int localId) {
+        String hex = compactHex(response);
+        String marker = String.format(Locale.US, "5A%02X", localId & 0xFF);
+        int p = hex.indexOf(marker);
+
+        if (p < 0) return "no positive 5A response";
+
+        String payload = hex.substring(p + marker.length());
+        StringBuilder out = new StringBuilder();
+
+        for (int i = 0; i + 1 < payload.length(); i += 2) {
+            int value;
+
+            try {
+                value = Integer.parseInt(payload.substring(i, i + 2), 16);
+            } catch (Exception e) {
+                break;
+            }
+
+            if (value == 0x00 || value == 0xFF) continue;
+
+            if (value >= 0x20 && value <= 0x7E) {
+                out.append((char)value);
+            } else {
+                out.append('.');
+            }
+        }
+
+        return out.length() == 0 ? "no printable ID" : out.toString();
     }
 
     private void chooseDumpSize(EcuMemoryReader.ProbeResult probe) {
