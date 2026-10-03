@@ -6,11 +6,16 @@ import java.util.Locale;
 public final class SuzukiSds {
     public interface Logger { void log(String s); }
 
+    public interface TransactionListener {
+        void onTransaction(String command, String response, long durationMs);
+    }
+
     private final Elm327Client elm;
     private final Logger logger;
 
     private int missedFrames = 0;
     private int recoveryCount = 0;
+    private TransactionListener transactionListener;
 
     public SuzukiSds(Elm327Client elm, Logger logger) {
         this.elm = elm;
@@ -19,6 +24,10 @@ public final class SuzukiSds {
 
     public int getMissedFrames() { return missedFrames; }
     public int getRecoveryCount() { return recoveryCount; }
+
+    public synchronized void setTransactionListener(TransactionListener listener) {
+        this.transactionListener = listener;
+    }
 
     /**
      * Send one raw KWP/SDS request through the already-initialised ECU session.
@@ -31,9 +40,41 @@ public final class SuzukiSds {
 
     private String run(String command, long timeoutMs) throws IOException {
         logger.log("> " + command);
-        String response = elm.command(command, timeoutMs);
-        logger.log("< " + response.replace('\r', ' ').replace('\n', ' ').trim());
-        return response;
+        long startNs = System.nanoTime();
+
+        try {
+            String response = elm.command(command, timeoutMs);
+            long durationMs = Math.max(
+                    0L,
+                    (System.nanoTime() - startNs) / 1_000_000L
+            );
+
+            logger.log("< " + response.replace('\r', ' ').replace('\n', ' ').trim());
+
+            TransactionListener listener = transactionListener;
+            if (listener != null) {
+                listener.onTransaction(command, response, durationMs);
+            }
+
+            return response;
+
+        } catch (IOException e) {
+            long durationMs = Math.max(
+                    0L,
+                    (System.nanoTime() - startNs) / 1_000_000L
+            );
+
+            TransactionListener listener = transactionListener;
+            if (listener != null) {
+                listener.onTransaction(
+                        command,
+                        "I/O ERROR: " + e.getMessage(),
+                        durationMs
+                );
+            }
+
+            throw e;
+        }
     }
 
     private static String compactUpper(String value) {
