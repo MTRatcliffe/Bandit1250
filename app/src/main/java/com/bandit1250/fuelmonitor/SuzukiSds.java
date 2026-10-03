@@ -88,6 +88,74 @@ public final class SuzukiSds {
         return compactUpper(response).contains("6108");
     }
 
+    private static boolean containsSdsIdentityResponse(String response) {
+        return compactUpper(response).contains("5A91");
+    }
+
+    private boolean proveIdentityOnce() {
+        try {
+            return containsSdsIdentityResponse(run("1A91 1", 4500));
+        } catch (IOException e) {
+            logger.log("1A91 proof failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Recover the known-good normal Bandit SDS session.
+     *
+     * This is deliberately more aggressive than the ordinary 21 08 retry path
+     * because alternate-init experiments showed that ATZ alone may leave some
+     * clone ELM/V-LINK adapters or the K-Line session stuck.
+     *
+     * Recovery stages:
+     * 1) prove the current session with read-only 1A91;
+     * 2) close protocol, allow the K-Line to sit idle, then run the full setup;
+     * 3) if still dead, close/re-open the Bluetooth SPP transport and repeat.
+     *
+     * No ECU state-changing diagnostic command is sent.
+     */
+    public synchronized boolean recoverKnownGoodSession() {
+        logger.log("SDS restore: proving normal session with 1A91");
+        if (proveIdentityOnce()) return true;
+
+        try {
+            logger.log("SDS restore: ATPC + K-Line idle + full re-init");
+            try {
+                run("ATPC", 2200);
+            } catch (IOException ignored) {
+                // Continue: some clones reject ATPC when the protocol is already lost.
+            }
+
+            sleepMs(1800);
+            initialise();
+            sleepMs(300);
+
+            if (proveIdentityOnce()) return true;
+
+        } catch (IOException e) {
+            logger.log("SDS restore full re-init failed: " + e.getMessage());
+        }
+
+        try {
+            logger.log("SDS restore: hard Bluetooth transport reconnect");
+            elm.close();
+            sleepMs(700);
+            elm.connect();
+            sleepMs(400);
+            initialise();
+            sleepMs(300);
+
+            if (proveIdentityOnce()) return true;
+
+        } catch (IOException e) {
+            logger.log("SDS restore hard reconnect failed: " + e.getMessage());
+        }
+
+        logger.log("SDS restore FAILED: ignition/adapter power cycle may be required");
+        return false;
+    }
+
     private static boolean initOk(String response) {
         if (response == null) return false;
         String s = response.toUpperCase(Locale.US);
@@ -222,6 +290,24 @@ public final class SuzukiSds {
             if (attempt < 2) sleepMs(200);
         }
 
-        throw new IOException("SDS link could not be recovered after retries + re-init");
+        recoveryCount++;
+        logger.log(
+                "SDS recovery #" + recoveryCount +
+                ": hard normal-session restore / Bluetooth reconnect"
+        );
+
+        if (recoverKnownGoodSession()) {
+            sleepMs(250);
+
+            for (int attempt = 1; attempt <= 2; attempt++) {
+                response = request2108Once();
+                if (response != null) return response;
+                if (attempt < 2) sleepMs(200);
+            }
+        }
+
+        throw new IOException(
+                "SDS link could not be recovered; ignition/adapter power cycle may be required"
+        );
     }
 }
