@@ -834,10 +834,10 @@ public final class EcuMemoryReader {
         String marker = String.format(Locale.US, "7F%02X", service & 0xFF);
         int p = hex.indexOf(marker);
 
-        if (p < 0 || p + 8 > hex.length()) return -1;
+        if (p < 0 || p + 6 > hex.length()) return -1;
 
         try {
-            return Integer.parseInt(hex.substring(p + 6, p + 8), 16);
+            return Integer.parseInt(hex.substring(p + 4, p + 6), 16);
         } catch (NumberFormatException e) {
             return -1;
         }
@@ -1493,12 +1493,12 @@ public final class EcuMemoryReader {
         String marker = String.format(Locale.US, "7F%02X", service);
         int p = hex.indexOf(marker);
 
-        if (p < 0 || p + 8 > hex.length()) return null;
+        if (p < 0 || p + 6 > hex.length()) return null;
 
         int nrc;
 
         try {
-            nrc = Integer.parseInt(hex.substring(p + 6, p + 8), 16);
+            nrc = Integer.parseInt(hex.substring(p + 4, p + 6), 16);
         } catch (NumberFormatException e) {
             return null;
         }
