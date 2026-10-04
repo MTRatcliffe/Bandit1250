@@ -42,6 +42,7 @@ public final class EcuToolsDialog {
     private Button actuatorIdScan;
     private Button profileRefresh;
     private Button protocolLab;
+    private Button readFlash;
     private Button shareProtocolLog;
     private TextView profileSummary;
     private TextView actuatorResult;
@@ -77,6 +78,11 @@ public final class EcuToolsDialog {
         profileButtons.addView(protocolLab, weight());
 
         box.addView(profileButtons);
+
+        readFlash = new Button(activity);
+        readFlash.setText("ECU READ / FLASH");
+        readFlash.setOnClickListener(v -> new EcuReadFlashDialog(activity).show());
+        box.addView(readFlash);
 
         LinearLayout logButtons = row();
 
@@ -647,6 +653,7 @@ public final class EcuToolsDialog {
         if (actuatorIdScan != null) actuatorIdScan.setEnabled(!busy);
         if (profileRefresh != null) profileRefresh.setEnabled(!busy);
         if (protocolLab != null) protocolLab.setEnabled(!busy);
+        if (readFlash != null) readFlash.setEnabled(!busy);
         if (shareProtocolLog != null) shareProtocolLog.setEnabled(!busy);
     }
 
