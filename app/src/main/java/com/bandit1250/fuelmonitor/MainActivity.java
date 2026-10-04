@@ -1289,6 +1289,102 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /**
+     * Run a non-SDS transport task on the same single I/O worker used by live
+     * polling. This prevents a USB KKL operation from overlapping 21 08 traffic.
+     *
+     * When closeBluetoothForRaw is true we first ask the ELM to close its
+     * protocol (ATPC), then close the Bluetooth transport. This is especially
+     * important before a raw bootloader attempt because the ELM automatic
+     * Tester Present wake-up must not be allowed to collide on the K-line.
+     */
+    <T> void runExclusiveTransportTask(
+            String label,
+            boolean closeBluetoothForRaw,
+            Callable<T> action,
+            EcuToolsDialog.SdsCallback<T> callback
+    ) {
+        final boolean resumePolling =
+                polling && !closeBluetoothForRaw;
+
+        polling = false;
+        setStatusYellow(
+                closeBluetoothForRaw
+                        ? "USB RAW: " + label + "…"
+                        : "TRANSPORT: " + label + "…"
+        );
+
+        io.execute(() -> {
+            T result = null;
+            Exception failure = null;
+
+            try {
+                if (closeBluetoothForRaw &&
+                        elm != null &&
+                        elm.isConnected()) {
+                    try {
+                        if (sds != null) {
+                            sds.requestRaw("ATPC", 2200);
+                        } else {
+                            elm.command("ATPC", 2200);
+                        }
+                    } catch (Exception ignored) {
+                        // The cable may already have been unplugged/swapped.
+                    }
+
+                    try {
+                        elm.close();
+                    } catch (Exception ignored) {}
+
+                    sds = null;
+                    elm = null;
+                }
+
+                result = action.call();
+
+            } catch (Exception e) {
+                failure = e;
+            }
+
+            final T finalResult = result;
+            final Exception finalFailure = failure;
+
+            ui.post(() -> callback.done(finalResult, finalFailure));
+
+            if (resumePolling &&
+                    sds != null &&
+                    elm != null &&
+                    elm.isConnected()) {
+                polling = true;
+                ui.post(this::updateConnectedStatus);
+                pollLoop();
+            } else if (closeBluetoothForRaw) {
+                ui.post(() -> {
+                    setStatusYellow("BT: OFF • USB raw session finished");
+                    connect.setText("CONNECT");
+                    connect.setEnabled(true);
+                });
+            }
+        });
+    }
+
+    /**
+     * Add a synthetic transport event to the same CSV used by protocol tests.
+     * Useful for USB configuration results where there is no SuzukiSds object.
+     */
+    void recordProtocolEvent(
+            String operation,
+            String command,
+            String response,
+            long durationMs
+    ) {
+        if (protocolLogger == null) return;
+
+        protocolLogger.setOperation(operation);
+        protocolLogger.record(command, response, durationMs);
+        protocolLogger.setOperation("");
+    }
+
     void shareEcuBin(File file) {
         shareInternalFile(
                 file,
