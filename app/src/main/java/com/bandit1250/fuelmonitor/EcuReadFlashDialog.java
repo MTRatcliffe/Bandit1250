@@ -105,10 +105,12 @@ public final class EcuReadFlashDialog {
         group.setOrientation(RadioGroup.VERTICAL);
 
         bluetoothRadio = new RadioButton(activity);
+        bluetoothRadio.setId(android.view.View.generateViewId());
         bluetoothRadio.setText("Bluetooth ELM / Vgate");
         group.addView(bluetoothRadio);
 
         usbRadio = new RadioButton(activity);
+        usbRadio.setId(android.view.View.generateViewId());
         usbRadio.setText("USB KKL / raw K-line cable");
         group.addView(usbRadio);
 
