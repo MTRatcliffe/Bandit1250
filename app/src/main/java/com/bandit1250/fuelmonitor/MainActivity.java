@@ -54,7 +54,6 @@ public final class MainActivity extends Activity {
     private volatile long lastPollDurationMs = -1;
 
     private double injectorFlowCcMin = 220.0;
-    private double netLatencyMs = 0.600;
     private double calibrationFactor = 1.000;
 
     private SharedPreferences prefs;
@@ -101,7 +100,6 @@ public final class MainActivity extends Activity {
         prefs = getSharedPreferences("bandit_monitor", MODE_PRIVATE);
         protocolLogger = new ProtocolSessionLogger(this);
         injectorFlowCcMin = readDoublePref("injector_flow", 220.0);
-        netLatencyMs = readDoublePref("net_latency", 0.600);
         calibrationFactor = readDoublePref("cal_factor", 1.000);
 
         buildUi();
@@ -174,7 +172,8 @@ public final class MainActivity extends Activity {
                 "2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 21 08\n" +
                 "CONNECT performs Bluetooth connection, SDS initialisation and continuous polling.\n" +
                 "Tap 📈 beside Live ECU data to show/hide the full diagnostics chart stack.\n" +
-                "Tap ⚙ beside Fuel L/h to edit injector flow, dead time and calibration factor."
+                "Tap ⚙ beside Fuel L/h to edit injector flow and tank calibration factor.\n" +
+                "Injector latency is automatically interpolated from the ECU battery raw byte using the firmware-derived table."
         );
         infoText.setVisibility(View.GONE);
         root.addView(infoText);
@@ -808,14 +807,17 @@ public final class MainActivity extends Activity {
         box.addView(f1);
         box.addView(flowInput);
 
-        TextView f2 = text("Net injector dead time / latency (ms)");
-        EditText latencyInput = dialogNumber(netLatencyMs, 3);
-        box.addView(f2);
-        box.addView(latencyInput);
+        TextView latencyInfo = text(
+                "Injector battery-voltage latency is automatic.\n" +
+                "The app interpolates the firmware-derived table directly from the " +
+                "raw 21 08 battery byte and subtracts it once from each injector pulse."
+        );
+        latencyInfo.setTextSize(12);
+        box.addView(latencyInfo);
 
-        TextView f3 = text("Tank calibration factor");
+        TextView f2 = text("Tank calibration factor");
         EditText calInput = dialogNumber(calibrationFactor, 3);
-        box.addView(f3);
+        box.addView(f2);
         box.addView(calInput);
 
         new AlertDialog.Builder(this)
@@ -827,10 +829,6 @@ public final class MainActivity extends Activity {
                             flowInput.getText().toString(),
                             injectorFlowCcMin
                     );
-                    netLatencyMs = parse(
-                            latencyInput.getText().toString(),
-                            netLatencyMs
-                    );
                     calibrationFactor = parse(
                             calInput.getText().toString(),
                             calibrationFactor
@@ -838,8 +836,8 @@ public final class MainActivity extends Activity {
 
                     prefs.edit()
                             .putLong("injector_flow", Double.doubleToRawLongBits(injectorFlowCcMin))
-                            .putLong("net_latency", Double.doubleToRawLongBits(netLatencyMs))
                             .putLong("cal_factor", Double.doubleToRawLongBits(calibrationFactor))
+                            .remove("net_latency")
                             .apply();
                 })
                 .show();
@@ -860,18 +858,19 @@ public final class MainActivity extends Activity {
         try {
             BanditLiveData d = BanditDecoder.decode(response);
 
-            // Apply dead-time correction independently to each injector,
-            // calculate each cylinder's fuel contribution, then sum all four.
-            // This avoids average-first errors when one pulse is near the
-            // short-pulse/dead-time clamp.
+            // SDS 21 08 reports final ELECTRICAL injector ON-time.
+            // Firmware analysis shows battery-voltage injector latency is added
+            // once to each cylinder's pulse. Interpolate that compensation
+            // directly from the raw battery byte, subtract it independently
+            // from each injector, then sum all four fuel contributions.
             double estimatedLph = FuelCalculator.estimatedFourInjectorLitresPerHour(
                     d.rpm,
+                    d.batteryRaw,
                     d.inj1,
                     d.inj2,
                     d.inj3,
                     d.inj4,
                     injectorFlowCcMin,
-                    netLatencyMs,
                     calibrationFactor
             );
 
@@ -933,7 +932,14 @@ public final class MainActivity extends Activity {
                 String.format(Locale.UK, "%.1f °C (est.)", d.intakeTempC));
         addLiveRow("EAP", bin8(d.frame, 19), "unverified");
         addLiveRow("Battery", bin8(d.frame, 20),
-                String.format(Locale.UK, "%.2f V (est.)", d.batteryEstV));
+                String.format(Locale.UK,
+                        "raw %d / %.2f V (est.)",
+                        d.batteryRaw,
+                        d.batteryEstV));
+        addLiveRow("Injector latency", "—",
+                String.format(Locale.UK,
+                        "%.3f ms (battery table)",
+                        FuelCalculator.getInjectorDeadTimeMs(d.batteryRaw)));
 
         addLiveRow("O₂ sensor", bin8(d.frame, 21), o2Guess(d.o2Raw));
 
