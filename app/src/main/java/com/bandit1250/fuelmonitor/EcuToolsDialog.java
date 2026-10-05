@@ -1,24 +1,30 @@
 package com.bandit1250.fuelmonitor;
 
-import android.app.*;
-import android.content.DialogInterface;
+import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.view.Gravity;
-import android.view.View;
 import android.widget.*;
 
-import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.*;
 
 /**
- * Fault-code and experimental ECU tools popup.
+ * Normal day-to-day ECU tools.
  *
- * The experimental ECU discovery is intentionally conservative. It uses only
- * read-only or deliberately non-state-changing KWP probes and never sends
- * erase/write/download/programming-mode/state-changing actuator/routine/key commands.
+ * Experimental protocol work has been moved out to DevToolsDialog so the main
+ * ECU tools page stays focused on useful bike functions:
+ *
+ * - adapter / ECU identity
+ * - engine ECU DTC read / clear
+ * - protocol-log sharing
+ *
+ * Deliberately removed from this page:
+ * - KWP 0x30 report/service-ID probe
+ * - safe ECU discovery
+ * - ECU read/flash experiment
+ *
+ * The remaining experimental tools live behind DEV / EXPERIMENTAL.
  */
 public final class EcuToolsDialog {
     public interface SdsAction<T> {
@@ -32,20 +38,13 @@ public final class EcuToolsDialog {
     private final MainActivity activity;
 
     private AlertDialog dialog;
+    private TextView profileSummary;
     private TextView dtcResult;
-    private TextView experimentalResult;
+    private Button profileRefresh;
     private Button readDtc;
     private Button clearDtc;
-    private Button probeRead;
-    private Button elmLengthTest;
-    private Button densoReadOnlyTest;
-    private Button actuatorIdScan;
-    private Button profileRefresh;
-    private Button protocolLab;
-    private Button readFlash;
+    private Button devTools;
     private Button shareProtocolLog;
-    private TextView profileSummary;
-    private TextView actuatorResult;
 
     public EcuToolsDialog(MainActivity activity) {
         this.activity = activity;
@@ -59,31 +58,85 @@ public final class EcuToolsDialog {
         box.setPadding(dp(18), dp(8), dp(18), dp(18));
         scroll.addView(box);
 
-        TextView profileHead = heading("ECU / adapter profile");
-        box.addView(profileHead);
+        // -------------------------------------------------------------
+        // ECU / adapter identity
+        // -------------------------------------------------------------
+        box.addView(heading("ECU / adapter profile"));
 
         profileSummary = mono(profileSummaryText());
         box.addView(profileSummary);
 
-        LinearLayout profileButtons = row();
-
         profileRefresh = new Button(activity);
         profileRefresh.setText("REFRESH INFO");
         profileRefresh.setOnClickListener(v -> refreshProfile());
-        profileButtons.addView(profileRefresh, weight());
+        box.addView(profileRefresh);
 
-        protocolLab = new Button(activity);
-        protocolLab.setText("PROTOCOL LAB");
-        protocolLab.setOnClickListener(v -> new ProtocolLabDialog(activity).show());
-        profileButtons.addView(protocolLab, weight());
+        TextView profileNote = body(
+                "Refresh reads only adapter identity, selected ELM protocol and the " +
+                "known Bandit 1A91 ECU identity."
+        );
+        profileNote.setTextSize(12);
+        profileNote.setPadding(0, dp(2), 0, dp(12));
+        box.addView(profileNote);
 
-        box.addView(profileButtons);
+        addDivider(box);
 
-        readFlash = new Button(activity);
-        readFlash.setText("ECU READ / FLASH");
-        readFlash.setOnClickListener(v -> new EcuReadFlashDialog(activity).show());
-        box.addView(readFlash);
+        // -------------------------------------------------------------
+        // DTCs
+        // -------------------------------------------------------------
+        box.addView(heading("Engine ECU fault codes"));
 
+        TextView engineNote = body(
+                "Bike-tested commands: 18 00 00 00 reads engine ECU fault codes; " +
+                "14 00 00 clears stored codes. Clearing remains confirmation-gated."
+        );
+        box.addView(engineNote);
+
+        LinearLayout dtcButtons = row();
+
+        readDtc = new Button(activity);
+        readDtc.setText("READ CODES");
+        readDtc.setOnClickListener(v -> readDtcs());
+        dtcButtons.addView(readDtc, weight());
+
+        clearDtc = new Button(activity);
+        clearDtc.setText("CLEAR STORED");
+        clearDtc.setOnClickListener(v -> confirmClear());
+        dtcButtons.addView(clearDtc, weight());
+
+        box.addView(dtcButtons);
+
+        dtcResult = mono("No fault-code read performed yet.");
+        box.addView(dtcResult);
+
+        TextView absNote = body(
+                "ABS remains separate; its SDS address/session has not yet been mapped."
+        );
+        absNote.setTextSize(12);
+        absNote.setPadding(0, dp(8), 0, dp(12));
+        box.addView(absNote);
+
+        addDivider(box);
+
+        // -------------------------------------------------------------
+        // Developer tools entry
+        // -------------------------------------------------------------
+        box.addView(heading("Developer / experimental"));
+
+        TextView devNote = body(
+                "Protocol-development tests are kept on a separate page so they do not " +
+                "clutter normal bike diagnostics."
+        );
+        box.addView(devNote);
+
+        devTools = new Button(activity);
+        devTools.setText("DEV / EXPERIMENTAL TOOLS");
+        devTools.setOnClickListener(v -> new DevToolsDialog(activity).show());
+        box.addView(devTools);
+
+        // -------------------------------------------------------------
+        // Protocol CSV
+        // -------------------------------------------------------------
         LinearLayout logButtons = row();
 
         shareProtocolLog = new Button(activity);
@@ -115,131 +168,6 @@ public final class EcuToolsDialog {
 
         box.addView(logButtons);
 
-        TextView profileNote = body(
-                "Profile results persist across app restarts. Experimental ECU-tool " +
-                "transactions are automatically written to the current CSV log."
-        );
-        profileNote.setPadding(0, dp(2), 0, dp(12));
-        box.addView(profileNote);
-
-        View profileDivider = new View(activity);
-        profileDivider.setBackgroundColor(Color.rgb(170, 170, 170));
-        box.addView(profileDivider, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(1)
-        ));
-
-        TextView engineHead = heading("Engine ECU fault codes");
-        box.addView(engineHead);
-
-        TextView engineNote = body(
-                "Bike-tested DTC commands: 18 00 00 00 returned positive 58 00, " +
-                "and 14 00 00 returned positive 54 00 00. Raw ECU responses are " +
-                "always shown and logged."
-        );
-        box.addView(engineNote);
-
-        LinearLayout dtcButtons = row();
-
-        readDtc = new Button(activity);
-        readDtc.setText("READ CODES");
-        readDtc.setOnClickListener(v -> readDtcs());
-        dtcButtons.addView(readDtc, weight());
-
-        clearDtc = new Button(activity);
-        clearDtc.setText("CLEAR STORED");
-        clearDtc.setOnClickListener(v -> confirmClear());
-        dtcButtons.addView(clearDtc, weight());
-
-        box.addView(dtcButtons);
-
-        dtcResult = mono("No fault-code read performed yet.");
-        box.addView(dtcResult);
-
-        TextView absNote = body(
-                "ABS is a separate SDS controller. ABS read/clear is not yet " +
-                "enabled here until its diagnostic address/session is mapped."
-        );
-        absNote.setPadding(0, dp(10), 0, dp(14));
-        box.addView(absNote);
-
-        View actuatorDivider = new View(activity);
-        actuatorDivider.setBackgroundColor(Color.rgb(170, 170, 170));
-        box.addView(actuatorDivider, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(1)
-        ));
-
-        TextView actuatorHead = heading(
-                "⚙ Standard KWP 0x30 probe — REPORT ONLY"
-        );
-        actuatorHead.setPadding(0, dp(14), 0, dp(4));
-        box.addView(actuatorHead);
-
-        TextView actuatorNote = body(
-                "Sweeps every local identifier 0x00..0xFF with 30 XX 01 " +
-                "(Report Current State), even if NRC 0x11 repeats. This deliberately checks " +
-                "for any ID-specific exception instead of stopping after the first reply.\n\n" +
-                "It does NOT send 0x00 Return Control, 0x07 Short Term Adjustment, " +
-                "an output state/value, or any request intended to move/switch an output."
-        );
-        box.addView(actuatorNote);
-
-        actuatorIdScan = new Button(activity);
-        actuatorIdScan.setText("⚙ 0x30 SERVICE / ID PROBE");
-        actuatorIdScan.setOnClickListener(v -> confirmActuatorIdScan());
-        box.addView(actuatorIdScan);
-
-        actuatorResult = mono(actuatorProfileSummary());
-        actuatorResult.setPadding(0, dp(4), 0, dp(12));
-        box.addView(actuatorResult);
-
-        View divider = new View(activity);
-        divider.setBackgroundColor(Color.rgb(170, 170, 170));
-        box.addView(divider, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(1)
-        ));
-
-        TextView experimentalHead = heading(
-                "Experimental ECU memory read — USE AT YOUR OWN RISK"
-        );
-        experimentalHead.setTextColor(Color.rgb(175, 65, 0));
-        experimentalHead.setPadding(0, dp(14), 0, dp(4));
-        box.addView(experimentalHead);
-
-        TextView warning = body(
-                "Conservative experimental discovery tool. It pauses normal live-data " +
-                "polling and tries safe/read-only KWP paths: ECU ID reads, 0x23 memory " +
-                "reads, a security SEED request only, a non-state-changing 0x10 service " +
-                "presence probe, and ECU-to-tester 0x35 RequestUpload formats.\n\n" +
-                "It NEVER sends a security key, ECU reset, RequestDownload, erase/write, " +
-                "programming-session change, actuator control or routine command.\n\n" +
-                "Keep ignition and battery voltage stable and do not disconnect Bluetooth " +
-                "while the discovery pass is running."
-        );
-        box.addView(warning);
-
-        probeRead = new Button(activity);
-        probeRead.setText("RUN SAFE ECU DISCOVERY");
-        probeRead.setOnClickListener(v -> confirmProbe());
-        box.addView(probeRead);
-
-        elmLengthTest = new Button(activity);
-        elmLengthTest.setText("ELM MESSAGE LENGTH TEST");
-        elmLengthTest.setOnClickListener(v -> confirmElmLengthTest());
-        box.addView(elmLengthTest);
-
-        densoReadOnlyTest = new Button(activity);
-        densoReadOnlyTest.setText("DENSO / K-LINE READ-ONLY TESTS");
-        densoReadOnlyTest.setOnClickListener(v -> confirmDensoReadOnlyTest());
-        box.addView(densoReadOnlyTest);
-
-        experimentalResult = mono(
-                "No ECU discovery pass performed yet."
-        );
-        box.addView(experimentalResult);
-
         dialog = new AlertDialog.Builder(activity)
                 .setTitle("Fault codes / ECU tools")
                 .setView(scroll)
@@ -250,412 +178,9 @@ public final class EcuToolsDialog {
         dialog.show();
     }
 
-    private void readDtcs() {
-        setDtcBusy(true);
-        dtcResult.setText("Reading engine ECU fault codes…\nTX: 18 00 00 00");
-
-        activity.runExclusiveSdsTask(
-                "DTC read",
-                sds -> sds.requestRaw("18000000 1", 5000),
-                (response, error) -> {
-                    setDtcBusy(false);
-
-                    if (error != null) {
-                        dtcResult.setText("DTC read failed:\n" + error.getMessage());
-                        return;
-                    }
-
-                    dtcResult.setText(describeDtcResponse(response));
-                }
-        );
-    }
-
-    private void confirmClear() {
-        new AlertDialog.Builder(activity)
-                .setTitle("Clear stored ECU fault codes?")
-                .setMessage(
-                        "This removes diagnostic history from the engine ECU. " +
-                        "An active fault will return if the fault is still present."
-                )
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Clear", (d, which) -> clearDtcs())
-                .show();
-    }
-
-    private void clearDtcs() {
-        setDtcBusy(true);
-        dtcResult.setText("Clearing stored engine ECU fault codes…\nTX: 14 00 00");
-
-        activity.runExclusiveSdsTask(
-                "DTC clear",
-                sds -> sds.requestRaw("140000 1", 5000),
-                (response, error) -> {
-                    setDtcBusy(false);
-
-                    if (error != null) {
-                        dtcResult.setText("Clear failed:\n" + error.getMessage());
-                        return;
-                    }
-
-                    String compact = compactHex(response);
-
-                    if (compact.contains("54")) {
-                        dtcResult.setText(
-                                "ECU acknowledged clear request.\n" +
-                                "Re-reading fault codes…"
-                        );
-                        // Re-read automatically so the user sees what remains.
-                        readDtcs();
-                    } else {
-                        String nrc = EcuMemoryReader.negativeResponseExplanation(
-                                response,
-                                0x14
-                        );
-                        dtcResult.setText(
-                                "Clear response was not the expected positive 0x54.\n" +
-                                (nrc == null ? "" : nrc + "\n") +
-                                "Raw: " + oneLine(response)
-                        );
-                    }
-                }
-        );
-    }
-
-    private void confirmActuatorIdScan() {
-        new AlertDialog.Builder(activity)
-                .setTitle("Probe standard KWP 0x30 without actuating?")
-                .setMessage(
-                        "This pauses live SDS polling and sends 30 XX 01 for every local ID " +
-                        "from 0x00 through 0xFF. Under KWP2000, 0x01 means Report Current State. " +
-                        "The sweep continues even if NRC 0x11 repeats, so we can rule out an " +
-                        "ID-specific exception from the bike itself.\n\n" +
-                        "It NEVER sends 0x00, 0x07 or an output state/value.\n\nContinue?"
-                )
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Scan", (d, which) -> startActuatorIdScan())
-                .show();
-    }
-
-    private void startActuatorIdScan() {
-        setExperimentalBusy(true);
-
-        actuatorResult.setText(
-                "Scanning all KWP 0x30 local IDs…\n" +
-                "Request: 30 XX 01 (Report Current State ONLY)\n" +
-                "0 / 256 IDs"
-        );
-
-        activity.runExclusiveSdsTask(
-                "non-actuating 0x30 actuator ID scan",
-                sds -> EcuMemoryReader.scanActuatorLocalIds(
-                        sds,
-                        (done, total, localId) ->
-                                activity.runOnUiThread(() -> {
-                                    if (actuatorResult != null) {
-                                        actuatorResult.setText(String.format(
-                                                Locale.UK,
-                                                "KWP 0x30 full report-only sweep\n" +
-                                                "%d / %d requests  •  current ID 0x%02X\n" +
-                                                "Continues through 0xFF even when NRC 0x11 repeats.",
-                                                done,
-                                                total,
-                                                localId & 0xFF
-                                        ));
-                                    }
-                                })
-                ),
-                (result, error) -> {
-                    setExperimentalBusy(false);
-
-                    if (error != null) {
-                        actuatorResult.setText(
-                                "Actuator-ID scan failed:\n" + error.getMessage()
-                        );
-                        return;
-                    }
-
-                    if (result == null) {
-                        actuatorResult.setText(
-                                "Actuator-ID scan returned no result."
-                        );
-                        return;
-                    }
-
-                    prefs().edit()
-                            .putInt(
-                                    "ecu_profile_actuator_scan_count",
-                                    result.scannedIds
-                            )
-                            .putInt(
-                                    "ecu_profile_actuator_positive_count",
-                                    result.positiveIds
-                            )
-                            .putString(
-                                    "ecu_profile_actuator_ids",
-                                    result.supportedIds
-                            )
-                            .putBoolean(
-                                    "ecu_profile_actuator_service_unsupported",
-                                    result.serviceUnsupported
-                            )
-                            .putLong(
-                                    "ecu_profile_actuator_updated",
-                                    System.currentTimeMillis()
-                            )
-                            .apply();
-
-                    actuatorResult.setText(result.report);
-                    updateProfileSummary();
-                }
-        );
-    }
-
-    private String actuatorProfileSummary() {
-        SharedPreferences p = prefs();
-
-        if (!p.contains("ecu_profile_actuator_scan_count")) {
-            return "No non-actuating 0x30 local-ID scan performed yet.";
-        }
-
-        int scanned = p.getInt("ecu_profile_actuator_scan_count", 0);
-        int positives = p.getInt("ecu_profile_actuator_positive_count", 0);
-        String ids = p.getString("ecu_profile_actuator_ids", "");
-        boolean unsupported = p.getBoolean(
-                "ecu_profile_actuator_service_unsupported",
-                false
-        );
-        long updated = p.getLong("ecu_profile_actuator_updated", 0L);
-
-        String when = updated == 0L
-                ? "unknown"
-                : new SimpleDateFormat(
-                        "yyyy-MM-dd HH:mm:ss",
-                        Locale.UK
-                ).format(new Date(updated));
-
-        if (unsupported) {
-            return "Last scan: service 0x30 reported unsupported in this SDS session.\n" +
-                    "IDs scanned before stop: " + scanned + " / 256\n" +
-                    "Updated: " + when;
-        }
-
-        return "Last scan: " + positives + " candidate actuator IDs from " +
-                scanned + " IDs scanned.\n" +
-                "Candidate IDs: " +
-                (ids == null || ids.isEmpty() ? "none" : "0x" + ids.replace(", ", ", 0x")) +
-                "\nUpdated: " + when;
-    }
-
-    private void confirmProbe() {
-        new AlertDialog.Builder(activity)
-                .setTitle("Run safe ECU discovery?")
-                .setMessage(
-                        "This pauses live SDS polling and runs only the conservative " +
-                        "read/read-discovery probes listed on this page.\n\n" +
-                        "No security key, ECU reset, programming-session change, " +
-                        "RequestDownload, write, erase, actuator or routine commands are sent.\n\n" +
-                        "Continue?"
-                )
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Continue", (d, which) -> startProbe())
-                .show();
-    }
-
-    private void startProbe() {
-        setExperimentalBusy(true);
-        experimentalResult.setText(
-                "Running conservative ECU discovery…\n" +
-                "Live 21 08 polling is temporarily paused."
-        );
-
-        activity.runExclusiveSdsTask(
-                "safe ECU discovery",
-                EcuMemoryReader::safeDiscovery,
-                (discovery, error) -> {
-                    setExperimentalBusy(false);
-
-                    if (error != null) {
-                        experimentalResult.setText(
-                                "Discovery failed:\n" + error.getMessage()
-                        );
-                        return;
-                    }
-
-                    if (discovery == null) {
-                        experimentalResult.setText(
-                                "Discovery returned no result."
-                        );
-                        return;
-                    }
-
-                    experimentalResult.setText(discovery.report);
-
-                    // Preserve the existing full .bin path if direct 0x23
-                    // memory access turns out to work on a different ECU/session.
-                    if (discovery.directMemory != null &&
-                            discovery.directMemory.supported) {
-                        chooseDumpSize(discovery.directMemory);
-                        return;
-                    }
-
-                    if (discovery.uploadAccepted) {
-                        String message = discovery.uploadDataReturned
-                                ? "A read-only 0x35/0x36 upload path returned data. " +
-                                  "The raw discovery report above tells us which request worked. " +
-                                  "Full .bin reconstruction via that path is not automated yet."
-                                : "The ECU accepted RequestUpload, but the tiny TransferData " +
-                                  "format was not confirmed. The raw responses above give us " +
-                                  "the next protocol clue.";
-
-                        new AlertDialog.Builder(activity)
-                                .setTitle("Promising ECU upload response")
-                                .setMessage(message)
-                                .setPositiveButton("OK", null)
-                                .show();
-                    }
-                }
-        );
-    }
-
-    private void confirmElmLengthTest() {
-        new AlertDialog.Builder(activity)
-                .setTitle("Run ELM message-length test?")
-                .setMessage(
-                        "This uses the known read-only 1A91 ECU-ID request and adds " +
-                        "zero padding to increasing request lengths. It is intended to " +
-                        "prove whether '?' responses originate in the V-LINK/ELM parser.\n\n" +
-                        "No ECU write, erase, reset, routine or actuator commands are sent."
-                )
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Run test", (d, which) -> startElmLengthTest())
-                .show();
-    }
-
-    private void startElmLengthTest() {
-        setExperimentalBusy(true);
-        experimentalResult.setText(
-                "Running ELM / K-Line message-length test…\n" +
-                "Live 21 08 polling is temporarily paused."
-        );
-
-        activity.runExclusiveSdsTask(
-                "ELM length test",
-                EcuMemoryReader::testElmMessageLength,
-                (result, error) -> {
-                    setExperimentalBusy(false);
-
-                    if (error != null) {
-                        experimentalResult.setText(
-                                "ELM length test failed:\n" + error.getMessage()
-                        );
-                        return;
-                    }
-
-                    experimentalResult.setText(
-                            result == null
-                                    ? "ELM length test returned no result."
-                                    : result.report
-                    );
-
-                    if (result != null) {
-                        SharedPreferences p = prefs();
-                        p.edit()
-                                .putInt(
-                                        "ecu_profile_max_tx",
-                                        result.largestEcuSeenBytes
-                                )
-                                .putInt(
-                                        "ecu_profile_first_question",
-                                        result.firstQuestionMarkBytes
-                                )
-                                .putLong(
-                                        "ecu_profile_updated",
-                                        System.currentTimeMillis()
-                                )
-                                .apply();
-                        updateProfileSummary();
-                    }
-                }
-        );
-    }
-
-    private void confirmDensoReadOnlyTest() {
-        new AlertDialog.Builder(activity)
-                .setTitle("Run Denso / K-Line read-only tests?")
-                .setMessage(
-                        "This performs additional read-only Suzuki/Denso identifier/data " +
-                        "queries and temporarily tests alternate KWP initialisation at " +
-                        "10,400 and 9,600 baud. The normal Bandit SDS connection is then " +
-                        "restored automatically.\n\n" +
-                        "It does not select a programming session, send a security key, " +
-                        "reset the ECU, write/erase memory or operate actuators."
-                )
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Run tests", (d, which) -> startDensoReadOnlyTest())
-                .show();
-    }
-
-    private void startDensoReadOnlyTest() {
-        setExperimentalBusy(true);
-        experimentalResult.setText(
-                "Running Denso / Suzuki read-only compatibility tests…\n" +
-                "This may take around a minute."
-        );
-
-        activity.runExclusiveSdsTask(
-                "Denso read-only test",
-                EcuMemoryReader::testDensoReadOnlyPaths,
-                (result, error) -> {
-                    setExperimentalBusy(false);
-
-                    if (error != null) {
-                        experimentalResult.setText(
-                                "Denso compatibility test failed:\n" + error.getMessage()
-                        );
-                        return;
-                    }
-
-                    experimentalResult.setText(
-                            result == null
-                                    ? "Denso compatibility test returned no result."
-                                    : result.report
-                    );
-
-                    if (result != null) {
-                        prefs().edit()
-                                .putString(
-                                        "ecu_profile_1a",
-                                        result.supported1A
-                                )
-                                .putString(
-                                        "ecu_profile_21",
-                                        result.supported21
-                                )
-                                .putBoolean(
-                                        "ecu_profile_normal_restored",
-                                        result.normalSdsRestored
-                                )
-                                .putLong(
-                                        "ecu_profile_updated",
-                                        System.currentTimeMillis()
-                                )
-                                .apply();
-                        updateProfileSummary();
-                    }
-                }
-        );
-    }
-
-    private void setExperimentalBusy(boolean busy) {
-        if (probeRead != null) probeRead.setEnabled(!busy);
-        if (elmLengthTest != null) elmLengthTest.setEnabled(!busy);
-        if (densoReadOnlyTest != null) densoReadOnlyTest.setEnabled(!busy);
-        if (actuatorIdScan != null) actuatorIdScan.setEnabled(!busy);
-        if (profileRefresh != null) profileRefresh.setEnabled(!busy);
-        if (protocolLab != null) protocolLab.setEnabled(!busy);
-        if (readFlash != null) readFlash.setEnabled(!busy);
-        if (shareProtocolLog != null) shareProtocolLog.setEnabled(!busy);
-    }
+    // -----------------------------------------------------------------
+    // ECU identity
+    // -----------------------------------------------------------------
 
     private static final class ProfileRead {
         final String adapter;
@@ -718,22 +243,9 @@ public final class EcuToolsDialog {
                                 .apply();
                     }
 
-                    updateProfileSummary();
+                    profileSummary.setText(profileSummaryText());
                 }
         );
-    }
-
-    private SharedPreferences prefs() {
-        return activity.getSharedPreferences(
-                "bandit_monitor",
-                android.content.Context.MODE_PRIVATE
-        );
-    }
-
-    private void updateProfileSummary() {
-        if (profileSummary != null) {
-            profileSummary.setText(profileSummaryText());
-        }
     }
 
     private String profileSummaryText() {
@@ -743,41 +255,6 @@ public final class EcuToolsDialog {
         String protocol = p.getString("ecu_profile_protocol", "not refreshed");
         String ecuAscii = p.getString("ecu_profile_id_ascii", "not refreshed");
         String raw = p.getString("ecu_profile_id_raw", "not refreshed");
-        int maxTx = p.getInt("ecu_profile_max_tx", 0);
-        int firstQuestion = p.getInt("ecu_profile_first_question", 0);
-        String ids1a = p.getString("ecu_profile_1a", "not tested");
-        String ids21 = p.getString("ecu_profile_21", "not tested");
-        String actuatorCandidates;
-
-        if (p.contains("ecu_profile_actuator_positive_count")) {
-            int actuatorCount = p.getInt(
-                    "ecu_profile_actuator_positive_count",
-                    0
-            );
-            int actuatorScanned = p.getInt(
-                    "ecu_profile_actuator_scan_count",
-                    0
-            );
-            boolean actuatorUnsupported = p.getBoolean(
-                    "ecu_profile_actuator_service_unsupported",
-                    false
-            );
-
-            actuatorCandidates = actuatorUnsupported
-                    ? "service 0x30 unsupported"
-                    : actuatorCount + " candidates / " + actuatorScanned + " IDs scanned";
-        } else {
-            actuatorCandidates = "not tested";
-        }
-
-        String restore;
-        if (p.contains("ecu_profile_normal_restored")) {
-            restore = p.getBoolean("ecu_profile_normal_restored", false)
-                    ? "yes"
-                    : "NO / not proven";
-        } else {
-            restore = "not tested";
-        }
 
         long updated = p.getLong("ecu_profile_updated", 0L);
         String when = updated == 0L
@@ -791,16 +268,6 @@ public final class EcuToolsDialog {
                 "ELM protocol: " + protocol + "\n" +
                 "ECU ID: " + ecuAscii + "\n" +
                 "1A91 raw: " + raw + "\n" +
-                "Tested TX payload: " +
-                (maxTx > 0 ? maxTx + " bytes" : "not tested") + "\n" +
-                "First local ?: " +
-                (firstQuestion > 0
-                        ? firstQuestion + " bytes"
-                        : "not tested") + "\n" +
-                "Positive 0x1A IDs: " + ids1a + "\n" +
-                "Positive 0x21 IDs: " + ids21 + "\n" +
-                "0x30 actuator candidates: " + actuatorCandidates + "\n" +
-                "Normal SDS recovered after alternate init: " + restore + "\n" +
                 "Profile updated: " + when;
     }
 
@@ -816,7 +283,6 @@ public final class EcuToolsDialog {
 
         for (int i = 0; i + 1 < payload.length(); i += 2) {
             int value;
-
             try {
                 value = Integer.parseInt(payload.substring(i, i + 2), 16);
             } catch (Exception e) {
@@ -835,138 +301,86 @@ public final class EcuToolsDialog {
         return out.length() == 0 ? "no printable ID" : out.toString();
     }
 
-    private void chooseDumpSize(EcuMemoryReader.ProbeResult probe) {
-        final String[] labels = {
-                "256 KiB",
-                "512 KiB",
-                "1 MiB"
-        };
+    // -----------------------------------------------------------------
+    // DTC read / clear
+    // -----------------------------------------------------------------
 
-        final long[] sizes = {
-                256L * 1024L,
-                512L * 1024L,
-                1024L * 1024L
-        };
-
-        new AlertDialog.Builder(activity)
-                .setTitle("Memory access works")
-                .setMessage(
-                        "The ECU accepted a standard read request. The exact " +
-                        "Bandit flash size is not yet verified in this app. " +
-                        "Choose the experimental range to read from address 0x000000.\n\n" +
-                        "A .bin will only be kept if the entire selected range completes."
-                )
-                .setItems(labels, (d, which) ->
-                        startFullRead(probe, sizes[which])
-                )
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void startFullRead(
-            EcuMemoryReader.ProbeResult probe,
-            long totalBytes
-    ) {
-        ProgressDialog progress = new ProgressDialog(activity);
-        progress.setTitle("Reading ECU memory");
-        progress.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
-        progress.setMax(100);
-        progress.setProgress(0);
-        progress.setCancelable(false);
-        progress.setMessage(
-                "READ-ONLY experimental operation\nAddress 0x000000"
-        );
-        progress.show();
-
-        setExperimentalBusy(true);
-
-        File dir = new File(activity.getFilesDir(), "ecu_dumps");
-        String stamp = new SimpleDateFormat(
-                "yyyy-MM-dd_HHmmss",
-                Locale.UK
-        ).format(new Date());
-
-        File output = new File(
-                dir,
-                "Bandit1250_ECU_" + stamp + ".bin"
-        );
+    private void readDtcs() {
+        setDtcBusy(true);
+        dtcResult.setText("Reading engine ECU fault codes…\nTX: 18 00 00 00");
 
         activity.runExclusiveSdsTask(
-                "ECU read",
-                sds -> EcuMemoryReader.read(
-                        sds,
-                        output,
-                        totalBytes,
-                        probe.addressBytes,
-                        probe.blockSize,
-                        (done, total, address) ->
-                                activity.runOnUiThread(() -> {
-                                    int pct = total <= 0
-                                            ? 0
-                                            : (int)Math.min(
-                                                    100,
-                                                    (done * 100L) / total
-                                            );
-                                    progress.setProgress(pct);
-                                    progress.setMessage(String.format(
-                                            Locale.UK,
-                                            "READ-ONLY experimental operation\n" +
-                                            "Address 0x%08X\n" +
-                                            "%,d / %,d bytes",
-                                            address,
-                                            done,
-                                            total
-                                    ));
-                                })
-                ),
-                (result, error) -> {
-                    setExperimentalBusy(false);
-
-                    if (progress.isShowing()) {
-                        progress.dismiss();
-                    }
+                "DTC read",
+                sds -> sds.requestRaw("18000000 1", 5000),
+                (response, error) -> {
+                    setDtcBusy(false);
 
                     if (error != null) {
-                        experimentalResult.setText(
-                                "ECU read stopped; no partial .bin was kept.\n\n" +
-                                error.getMessage()
-                        );
+                        dtcResult.setText("DTC read failed:\n" + error.getMessage());
                         return;
                     }
 
-                    experimentalResult.setText(
-                            "ECU memory read complete.\n" +
-                            "File: " + result.file.getName() + "\n" +
-                            "Bytes: " + result.bytes + "\n" +
-                            "SHA-256: " + result.sha256
-                    );
-
-                    showReadComplete(result);
+                    dtcResult.setText(describeDtcResponse(response));
                 }
         );
     }
 
-    private void showReadComplete(EcuMemoryReader.ReadResult result) {
-        String size = humanBytes(result.bytes);
-
+    private void confirmClear() {
         new AlertDialog.Builder(activity)
-                .setTitle("ECU read complete")
+                .setTitle("Clear stored ECU fault codes?")
                 .setMessage(
-                        "File: " + result.file.getName() + "\n" +
-                        "Size: " + size + "\n" +
-                        "SHA-256:\n" + result.sha256 + "\n\n" +
-                        "Would you like to share the .bin?"
+                        "This removes diagnostic history from the engine ECU. " +
+                        "An active fault will return if the fault is still present."
                 )
-                .setNegativeButton("Close", null)
-                .setPositiveButton("Share BIN", (d, which) ->
-                        activity.shareEcuBin(result.file)
-                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Clear", (d, which) -> clearDtcs())
                 .show();
+    }
+
+    private void clearDtcs() {
+        setDtcBusy(true);
+        dtcResult.setText("Clearing stored engine ECU fault codes…\nTX: 14 00 00");
+
+        activity.runExclusiveSdsTask(
+                "DTC clear",
+                sds -> sds.requestRaw("140000 1", 5000),
+                (response, error) -> {
+                    setDtcBusy(false);
+
+                    if (error != null) {
+                        dtcResult.setText("Clear failed:\n" + error.getMessage());
+                        return;
+                    }
+
+                    String compact = compactHex(response);
+
+                    if (compact.contains("54")) {
+                        dtcResult.setText(
+                                "ECU acknowledged clear request.\n" +
+                                "Re-reading fault codes…"
+                        );
+                        readDtcs();
+                    } else {
+                        String nrc = EcuMemoryReader.negativeResponseExplanation(
+                                response,
+                                0x14
+                        );
+                        dtcResult.setText(
+                                "Clear response was not the expected positive 0x54.\n" +
+                                (nrc == null ? "" : nrc + "\n") +
+                                "Raw: " + oneLine(response)
+                        );
+                    }
+                }
+        );
     }
 
     private void setDtcBusy(boolean busy) {
         if (readDtc != null) readDtc.setEnabled(!busy);
         if (clearDtc != null) clearDtc.setEnabled(!busy);
+        if (profileRefresh != null) profileRefresh.setEnabled(!busy);
+        if (devTools != null) devTools.setEnabled(!busy);
+        if (shareProtocolLog != null) shareProtocolLog.setEnabled(!busy);
     }
 
     private String describeDtcResponse(String response) {
@@ -1004,8 +418,6 @@ public final class EcuToolsDialog {
         int offset = 0;
         Integer reportedCount = null;
 
-        // KWP implementations commonly prepend a count before 3-byte
-        // DTC/status tuples. Handle both count and no-count forms.
         if (bytes.size() >= 1 && ((bytes.size() - 1) % 3 == 0)) {
             reportedCount = bytes.get(0);
             offset = 1;
@@ -1028,7 +440,6 @@ public final class EcuToolsDialog {
             int status = bytes.get(i + 2);
             int code = (hi << 8) | lo;
 
-            // Some ECUs pad empty records with zero.
             if (code == 0 && status == 0) continue;
 
             out.append(decodeStandardDtc(code))
@@ -1045,8 +456,10 @@ public final class EcuToolsDialog {
         }
 
         out.append("\nRaw: ").append(oneLine(response));
-        out.append("\n\nNote: code/status interpretation is provisional until " +
-                "verified against the Bandit's Suzuki SDS format.");
+        out.append(
+                "\n\nNote: code/status interpretation remains provisional " +
+                "until fully verified against the Bandit's Suzuki SDS format."
+        );
 
         return out.toString();
     }
@@ -1066,6 +479,17 @@ public final class EcuToolsDialog {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------
+
+    private SharedPreferences prefs() {
+        return activity.getSharedPreferences(
+                "bandit_monitor",
+                android.content.Context.MODE_PRIVATE
+        );
+    }
+
     private String compactHex(String value) {
         if (value == null) return "";
         return value.toUpperCase(Locale.US)
@@ -1079,19 +503,13 @@ public final class EcuToolsDialog {
                 .trim();
     }
 
-    private String humanBytes(long bytes) {
-        if (bytes >= 1024L * 1024L) {
-            return String.format(
-                    Locale.UK,
-                    "%.2f MiB",
-                    bytes / (1024.0 * 1024.0)
-            );
-        }
-        return String.format(
-                Locale.UK,
-                "%.1f KiB",
-                bytes / 1024.0
-        );
+    private void addDivider(LinearLayout box) {
+        android.view.View divider = new android.view.View(activity);
+        divider.setBackgroundColor(Color.rgb(170, 170, 170));
+        box.addView(divider, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(1)
+        ));
     }
 
     private LinearLayout row() {
