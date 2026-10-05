@@ -39,8 +39,10 @@ public final class EcuToolsDialog {
 
     private AlertDialog dialog;
     private TextView profileSummary;
+    private TextView profileRaw;
     private TextView dtcResult;
     private Button profileRefresh;
+    private Button profileRawToggle;
     private Button readDtc;
     private Button clearDtc;
     private Button devTools;
@@ -61,7 +63,7 @@ public final class EcuToolsDialog {
         // -------------------------------------------------------------
         // ECU / adapter identity
         // -------------------------------------------------------------
-        box.addView(heading("ECU / adapter profile"));
+        box.addView(heading("ECU information"));
 
         profileSummary = mono(profileSummaryText());
         box.addView(profileSummary);
@@ -71,9 +73,26 @@ public final class EcuToolsDialog {
         profileRefresh.setOnClickListener(v -> refreshProfile());
         box.addView(profileRefresh);
 
+        profileRawToggle = new Button(activity);
+        profileRawToggle.setText("RAW ID DATA");
+        profileRawToggle.setOnClickListener(v -> {
+            boolean show = profileRaw.getVisibility() != android.view.View.VISIBLE;
+            profileRaw.setVisibility(
+                    show ? android.view.View.VISIBLE : android.view.View.GONE
+            );
+            profileRawToggle.setText(show ? "HIDE RAW ID DATA" : "RAW ID DATA");
+        });
+        box.addView(profileRawToggle);
+
+        profileRaw = mono(profileRawText());
+        profileRaw.setVisibility(android.view.View.GONE);
+        profileRaw.setTextSize(11);
+        box.addView(profileRaw);
+
         TextView profileNote = body(
-                "Refresh reads only adapter identity, selected ELM protocol and the " +
-                "known Bandit 1A91 ECU identity."
+                "Refresh reads only known read-only identification records: " +
+                "1A89, 1A91, 1A95, 1A9A and 21 90. The software ID is decoded " +
+                "from the first 8 data bytes of 21 90; unknown records remain raw."
         );
         profileNote.setTextSize(12);
         profileNote.setPadding(0, dp(2), 0, dp(12));
@@ -185,42 +204,77 @@ public final class EcuToolsDialog {
     private static final class ProfileRead {
         final String adapter;
         final String protocol;
-        final String ecuRaw;
-        final String ecuAscii;
+
+        final String id89Raw;
+        final String id91Raw;
+        final String id95Raw;
+        final String id9aRaw;
+        final String id90Raw;
+
+        final String ecuPart;
+        final String ecuPartAlt;
+        final String softwareId;
 
         ProfileRead(
                 String adapter,
                 String protocol,
-                String ecuRaw,
-                String ecuAscii
+                String id89Raw,
+                String id91Raw,
+                String id95Raw,
+                String id9aRaw,
+                String id90Raw,
+                String ecuPart,
+                String ecuPartAlt,
+                String softwareId
         ) {
             this.adapter = adapter;
             this.protocol = protocol;
-            this.ecuRaw = ecuRaw;
-            this.ecuAscii = ecuAscii;
+            this.id89Raw = id89Raw;
+            this.id91Raw = id91Raw;
+            this.id95Raw = id95Raw;
+            this.id9aRaw = id9aRaw;
+            this.id90Raw = id90Raw;
+            this.ecuPart = ecuPart;
+            this.ecuPartAlt = ecuPartAlt;
+            this.softwareId = softwareId;
         }
     }
 
     private void refreshProfile() {
         profileRefresh.setEnabled(false);
-        profileSummary.setText("Refreshing adapter / ECU identity…");
+        if (profileRawToggle != null) profileRawToggle.setEnabled(false);
+        profileSummary.setText("Refreshing ECU identification…");
 
         activity.runExclusiveSdsTask(
-                "ECU profile refresh",
+                "ECU information refresh",
                 sds -> {
                     String adapter = sds.requestRaw("ATI", 2500);
                     String protocol = sds.requestRaw("ATDPN", 2500);
-                    String ecu = sds.requestRaw("1A91 1", 4500);
+
+                    // All of these are already-proven read-only identification
+                    // / local-data requests on this Bandit ECU family.
+                    String id89 = sds.requestRaw("1A89 1", 4500);
+                    String id91 = sds.requestRaw("1A91 1", 4500);
+                    String id95 = sds.requestRaw("1A95 1", 4500);
+                    String id9a = sds.requestRaw("1A9A 1", 4500);
+                    String id90 = sds.requestRaw("2190 1", 5500);
 
                     return new ProfileRead(
                             oneLine(adapter),
                             oneLine(protocol),
-                            oneLine(ecu),
-                            extract1AAscii(ecu, 0x91)
+                            oneLine(id89),
+                            oneLine(id91),
+                            oneLine(id95),
+                            oneLine(id9a),
+                            oneLine(id90),
+                            extract1AAscii(id91, 0x91),
+                            extract1AAscii(id9a, 0x9A),
+                            extract21AsciiPrefix(id90, 0x90, 8)
                     );
                 },
                 (info, error) -> {
                     profileRefresh.setEnabled(true);
+                    if (profileRawToggle != null) profileRawToggle.setEnabled(true);
 
                     if (error != null) {
                         profileSummary.setText(
@@ -234,8 +288,18 @@ public final class EcuToolsDialog {
                         prefs().edit()
                                 .putString("ecu_profile_adapter", info.adapter)
                                 .putString("ecu_profile_protocol", info.protocol)
-                                .putString("ecu_profile_id_raw", info.ecuRaw)
-                                .putString("ecu_profile_id_ascii", info.ecuAscii)
+                                .putString("ecu_profile_1a89_raw", info.id89Raw)
+                                .putString("ecu_profile_1a91_raw", info.id91Raw)
+                                .putString("ecu_profile_1a95_raw", info.id95Raw)
+                                .putString("ecu_profile_1a9a_raw", info.id9aRaw)
+                                .putString("ecu_profile_2190_raw", info.id90Raw)
+                                .putString("ecu_profile_part", info.ecuPart)
+                                .putString("ecu_profile_part_alt", info.ecuPartAlt)
+                                .putString("ecu_profile_software", info.softwareId)
+                                // Preserve old keys for compatibility with any
+                                // previously stored profile data.
+                                .putString("ecu_profile_id_raw", info.id91Raw)
+                                .putString("ecu_profile_id_ascii", info.ecuPart)
                                 .putLong(
                                         "ecu_profile_updated",
                                         System.currentTimeMillis()
@@ -244,6 +308,9 @@ public final class EcuToolsDialog {
                     }
 
                     profileSummary.setText(profileSummaryText());
+                    if (profileRaw != null) {
+                        profileRaw.setText(profileRawText());
+                    }
                 }
         );
     }
@@ -253,8 +320,19 @@ public final class EcuToolsDialog {
 
         String adapter = p.getString("ecu_profile_adapter", "not refreshed");
         String protocol = p.getString("ecu_profile_protocol", "not refreshed");
-        String ecuAscii = p.getString("ecu_profile_id_ascii", "not refreshed");
-        String raw = p.getString("ecu_profile_id_raw", "not refreshed");
+
+        String ecuPart = p.getString(
+                "ecu_profile_part",
+                p.getString("ecu_profile_id_ascii", "not refreshed")
+        );
+        String ecuPartAlt = p.getString(
+                "ecu_profile_part_alt",
+                "not refreshed"
+        );
+        String softwareId = p.getString(
+                "ecu_profile_software",
+                "not refreshed"
+        );
 
         long updated = p.getLong("ecu_profile_updated", 0L);
         String when = updated == 0L
@@ -265,10 +343,30 @@ public final class EcuToolsDialog {
                 ).format(new Date(updated));
 
         return "Adapter: " + adapter + "\n" +
-                "ELM protocol: " + protocol + "\n" +
-                "ECU ID: " + ecuAscii + "\n" +
-                "1A91 raw: " + raw + "\n" +
-                "Profile updated: " + when;
+                "ELM protocol: " + protocol + "\n\n" +
+                "Suzuki ECU ID: " + ecuPart + "\n" +
+                "Alternate ECU ID: " + ecuPartAlt + "\n" +
+                "Software / firmware ID: " + softwareId + "\n" +
+                "Hardware/version fields: not decoded yet\n\n" +
+                "Updated: " + when;
+    }
+
+    private String profileRawText() {
+        SharedPreferences p = prefs();
+
+        return "1A89: " +
+                p.getString("ecu_profile_1a89_raw", "not refreshed") + "\n" +
+                "1A91: " +
+                p.getString(
+                        "ecu_profile_1a91_raw",
+                        p.getString("ecu_profile_id_raw", "not refreshed")
+                ) + "\n" +
+                "1A95: " +
+                p.getString("ecu_profile_1a95_raw", "not refreshed") + "\n" +
+                "1A9A: " +
+                p.getString("ecu_profile_1a9a_raw", "not refreshed") + "\n" +
+                "2190: " +
+                p.getString("ecu_profile_2190_raw", "not refreshed");
     }
 
     private String extract1AAscii(String response, int localId) {
@@ -299,6 +397,51 @@ public final class EcuToolsDialog {
         }
 
         return out.length() == 0 ? "no printable ID" : out.toString();
+    }
+
+    /**
+     * Decode a fixed number of data bytes from a positive 0x21 local-ID
+     * response. For 21 90 the BIN analysis proves that the first eight data
+     * bytes map to the ROM software ID at 0x3FFF0..0x3FFF7.
+     */
+    private String extract21AsciiPrefix(
+            String response,
+            int localId,
+            int byteCount
+    ) {
+        String hex = compactHex(response);
+        String marker = String.format(Locale.US, "61%02X", localId & 0xFF);
+        int p = hex.indexOf(marker);
+
+        if (p < 0) return "no positive 61 response";
+
+        int start = p + marker.length();
+        int wantedChars = byteCount * 2;
+
+        if (hex.length() < start + wantedChars) {
+            return "short 21 response";
+        }
+
+        String payload = hex.substring(start, start + wantedChars);
+        StringBuilder out = new StringBuilder();
+
+        for (int i = 0; i + 1 < payload.length(); i += 2) {
+            int value;
+
+            try {
+                value = Integer.parseInt(payload.substring(i, i + 2), 16);
+            } catch (NumberFormatException e) {
+                return "invalid 21 response";
+            }
+
+            if (value >= 0x20 && value <= 0x7E) {
+                out.append((char)value);
+            } else {
+                out.append('.');
+            }
+        }
+
+        return out.toString();
     }
 
     // -----------------------------------------------------------------
@@ -379,6 +522,7 @@ public final class EcuToolsDialog {
         if (readDtc != null) readDtc.setEnabled(!busy);
         if (clearDtc != null) clearDtc.setEnabled(!busy);
         if (profileRefresh != null) profileRefresh.setEnabled(!busy);
+        if (profileRawToggle != null) profileRawToggle.setEnabled(!busy);
         if (devTools != null) devTools.setEnabled(!busy);
         if (shareProtocolLog != null) shareProtocolLog.setEnabled(!busy);
     }
