@@ -52,8 +52,12 @@ public final class BanditDecoder {
 
         int eapRaw = val(f,19);
 
+        // Keep the raw byte because the injector-latency table is indexed from
+        // the ECU's raw battery value; voltage conversion is only for display.
+        int batteryRaw = val(f,20);
+
         // Provisional 0-20 V scaling used in the earlier Bandit mapping work.
-        double batteryEstV = val(f,20) * 20.0 / 255.0;
+        double batteryEstV = batteryRaw * 20.0 / 255.0;
 
         int o2Raw = val(f,21);
         int gearRaw = val(f,22);
@@ -84,6 +88,7 @@ public final class BanditDecoder {
                 engineTempC,
                 intakeTempC,
                 eapRaw,
+                batteryRaw,
                 batteryEstV,
                 o2Raw,
                 gearRaw,
@@ -107,7 +112,13 @@ public final class BanditDecoder {
         s.append(String.format(Locale.UK, "Coolant             %.1f °C\n", d.engineTempC));
         s.append(String.format(Locale.UK, "Intake air temp     %.1f °C\n", d.intakeTempC));
         s.append(String.format(Locale.UK, "EAP raw             %d (0x%02X)\n", d.eapRaw, d.eapRaw));
-        s.append(String.format(Locale.UK, "Battery (est.)      %.2f V\n", d.batteryEstV));
+        s.append(String.format(Locale.UK,
+                "Battery             raw %d / %.2f V (est.)\n",
+                d.batteryRaw,
+                d.batteryEstV));
+        s.append(String.format(Locale.UK,
+                "Injector latency    %.3f ms (battery table)\n",
+                FuelCalculator.getInjectorDeadTimeMs(d.batteryRaw)));
         s.append(String.format(Locale.UK, "O2 B1 raw           %d (0x%02X)\n", d.o2Raw, d.o2Raw));
         s.append(String.format(Locale.UK, "Gear sensor raw     %d (0x%02X)\n", d.gearRaw, d.gearRaw));
         s.append(String.format(Locale.UK, "IAP-2 (est.)        %.1f kPa\n", d.iap2Kpa));
