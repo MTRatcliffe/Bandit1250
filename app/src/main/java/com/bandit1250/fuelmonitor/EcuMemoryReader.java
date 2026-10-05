@@ -746,6 +746,11 @@ public final class EcuMemoryReader {
             case 0x12: meaning = "sub-function not supported / invalid format"; break;
             case 0x21: meaning = "busy - repeat request"; break;
             case 0x22: meaning = "conditions not correct"; break;
+            case 0x23:
+                meaning = service == 0x14
+                        ? "DTC clear operation failed"
+                        : "operation failed / manufacturer-specific failure";
+                break;
             case 0x31: meaning = "request out of range"; break;
             case 0x33: meaning = "security access denied"; break;
             case 0x35: meaning = "invalid key"; break;
