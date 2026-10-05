@@ -26,9 +26,7 @@ public final class ProtocolLabDialog {
     private Button dtcSweep;
     private Button scan1a;
     private Button scan21;
-    private Button scan22;
     private Button allReadOnly;
-    private Button a5Discovery;
 
     public ProtocolLabDialog(MainActivity activity) {
         this.activity = activity;
@@ -44,8 +42,9 @@ public final class ProtocolLabDialog {
 
         TextView note = text(
                 "Read-only Protocol Lab\n\n" +
-                "Allowed KWP read services: 0x12, 0x13, 0x17, 0x18, 0x1A, " +
-                "0x21, 0x22 and 0x23. AT commands, reset/session/security/" +
+                "Firmware-proven safe reads include 0x18, 0x1A, 0x21 and tester-present 0x3E. " +
+                "Candidate/legacy read services 0x12, 0x13, 0x17, 0x22 and 0x23 remain " +
+                "available for explicit raw testing. AT commands, reset/session/security/" +
                 "upload/download/write/routine/actuator services are blocked. " +
                 "Requests are limited to 8 data bytes for the current V-LINK/ELM path.\n\n" +
                 "Every sweep is written to the protocol CSV, including negative replies."
@@ -62,10 +61,10 @@ public final class ProtocolLabDialog {
 
         LinearLayout presets2 = new LinearLayout(activity);
         presets2.setOrientation(LinearLayout.HORIZONTAL);
+        presets2.addView(preset("12"), weight());
         presets2.addView(preset("13"), weight());
         presets2.addView(preset("17"), weight());
-        presets2.addView(preset("18"), weight());
-        presets2.addView(preset("12"), weight());
+        presets2.addView(preset("3E"), weight());
         box.addView(presets2);
 
         commandInput = new EditText(activity);
@@ -89,11 +88,11 @@ public final class ProtocolLabDialog {
         box.addView(sweepHead);
 
         TextView sweepNote = text(
-                "• DTC FORMS tests several standard read-only DTC/freeze-frame request shapes.\n" +
+                "• DTC/CANDIDATES sends the firmware-proven 18 00 00 00 read plus " +
+                "candidate services 12, 13 and 17 without inventing their meanings.\n" +
                 "• 1A scans ECU-identification local IDs 00..FF.\n" +
-                "• 21 scans data local IDs 00..FF.\n" +
-                "• 22 TARGETS scans low common IDs 0000..00FF plus F180..F19F.\n" +
-                "• ALL READ-ONLY runs all four groups and includes representative 0x23 read probes."
+                "• 21 scans local/engineering IDs 00..FF.\n" +
+                "• ALL READ-ONLY runs those three groups. Every reply is logged."
         );
         sweepNote.setTextSize(12);
         box.addView(sweepNote);
@@ -102,7 +101,7 @@ public final class ProtocolLabDialog {
         sweepRow1.setOrientation(LinearLayout.HORIZONTAL);
 
         dtcSweep = new Button(activity);
-        dtcSweep.setText("DTC FORMS");
+        dtcSweep.setText("DTC / CANDIDATES");
         dtcSweep.setOnClickListener(v -> runSweep(SweepKind.DTC));
         sweepRow1.addView(dtcSweep, weight());
 
@@ -121,11 +120,6 @@ public final class ProtocolLabDialog {
         scan21.setOnClickListener(v -> runSweep(SweepKind.ID_21));
         sweepRow2.addView(scan21, weight());
 
-        scan22 = new Button(activity);
-        scan22.setText("SCAN 22 TARGETS");
-        scan22.setOnClickListener(v -> runSweep(SweepKind.ID_22));
-        sweepRow2.addView(scan22, weight());
-
         box.addView(sweepRow2);
 
         allReadOnly = new Button(activity);
@@ -134,9 +128,8 @@ public final class ProtocolLabDialog {
                 new AlertDialog.Builder(activity)
                         .setTitle("Run full read-only protocol discovery?")
                         .setMessage(
-                                "This sends the DTC read forms, all 256 0x1A IDs, " +
-                                "all 256 0x21 IDs, the selected 0x22 common-ID ranges, " +
-                                "and representative 0x23 read probes.\n\n" +
+                                "This sends the proven DTC read plus candidate 12/13/17 " +
+                                "requests, then all 256 0x1A IDs and all 256 0x21 IDs.\n\n" +
                                 "No clear/write/reset/session/security/routine/actuator " +
                                 "or download command is sent. All replies are logged."
                         )
@@ -146,24 +139,13 @@ public final class ProtocolLabDialog {
         );
         box.addView(allReadOnly);
 
-        TextView a5Head = text("Suzuki/Denso proprietary active-control discovery");
-        a5Head.setTypeface(null, Typeface.BOLD);
-        a5Head.setPadding(0, dp(14), 0, dp(4));
-        box.addView(a5Head);
-
-        TextView a5Note = text(
-                "K8-era Denso firmware analysis identifies service 0xA5 as the active-control " +
-                "dispatcher. It is kept OUT of the manual read-only command field. The dedicated " +
-                "discovery panel scans A5 IDs 00..FF using deliberately incomplete A5 <ID> probes " +
-                "and never sends a complete known actuator payload."
+        TextView activeControlNote = text(
+                "Active-control service 0xA5 is intentionally not auto-scanned here. " +
+                "Firmware analysis proves it can operate real ECU outputs, so future " +
+                "A5 controls will require an explicit Experimental Active Control enable."
         );
-        a5Note.setTextSize(12);
-        box.addView(a5Note);
-
-        a5Discovery = new Button(activity);
-        a5Discovery.setText("A5 ACTIVE-CONTROL DISCOVERY");
-        a5Discovery.setOnClickListener(v -> new A5DiscoveryDialog(activity).show());
-        box.addView(a5Discovery);
+        activeControlNote.setTextSize(12);
+        box.addView(activeControlNote);
 
         LinearLayout logButtons = new LinearLayout(activity);
         logButtons.setOrientation(LinearLayout.HORIZONTAL);
@@ -213,7 +195,6 @@ public final class ProtocolLabDialog {
         DTC,
         ID_1A,
         ID_21,
-        ID_22,
         ALL
     }
 
@@ -387,17 +368,14 @@ public final class ProtocolLabDialog {
         ArrayList<String> commands = new ArrayList<>();
 
         if (kind == SweepKind.DTC || kind == SweepKind.ALL) {
-            // KWP stored-data read services. No clear command (0x14) is included.
+            // 18 00 00 00 is proven from this Bandit firmware. Services
+            // 0x12/0x13/0x17 remain candidates with unknown semantics.
             Collections.addAll(
                     commands,
-                    "12",
-                    "1200",
-                    "13",
-                    "17",
-                    "18",
                     "18000000",
-                    "1800FF00",
-                    "1802FF00"
+                    "12",
+                    "13",
+                    "17"
             );
         }
 
@@ -413,35 +391,14 @@ public final class ProtocolLabDialog {
             }
         }
 
-        if (kind == SweepKind.ID_22 || kind == SweepKind.ALL) {
-            // Low common-ID range: useful for manufacturer-specific DIDs.
-            for (int did = 0x0000; did <= 0x00FF; did++) {
-                commands.add(String.format(Locale.US, "22%04X", did));
-            }
-
-            // Common KWP/UDS identification area around ECU/VIN/software IDs.
-            for (int did = 0xF180; did <= 0xF19F; did++) {
-                commands.add(String.format(Locale.US, "22%04X", did));
-            }
-        }
-
-        if (kind == SweepKind.ALL) {
-            // Representative ReadMemoryByAddress formats already used by the
-            // safe discovery tool. These are reads only.
-            commands.add("2300000001");
-            commands.add("230000000001");
-            commands.add("23000001");
-        }
-
         return commands;
     }
 
     private String sweepName(SweepKind kind) {
         switch (kind) {
-            case DTC: return "DTC / freeze-frame read forms";
+            case DTC: return "DTC read + unknown candidate services";
             case ID_1A: return "0x1A ID sweep 00..FF";
             case ID_21: return "0x21 local-ID sweep 00..FF";
-            case ID_22: return "0x22 targeted common-ID sweep";
             case ALL: return "ALL READ-ONLY DISCOVERY";
             default: return "Protocol sweep";
         }
@@ -452,9 +409,7 @@ public final class ProtocolLabDialog {
         if (dtcSweep != null) dtcSweep.setEnabled(!busy);
         if (scan1a != null) scan1a.setEnabled(!busy);
         if (scan21 != null) scan21.setEnabled(!busy);
-        if (scan22 != null) scan22.setEnabled(!busy);
         if (allReadOnly != null) allReadOnly.setEnabled(!busy);
-        if (a5Discovery != null) a5Discovery.setEnabled(!busy);
     }
 
     private String validateReadOnly(String value) {
@@ -490,7 +445,8 @@ public final class ProtocolLabDialog {
                 service == 0x1A ||
                 service == 0x21 ||
                 service == 0x22 ||
-                service == 0x23;
+                service == 0x23 ||
+                service == 0x3E;
 
         if (!allowed) {
             throw new IllegalArgumentException(String.format(
