@@ -497,7 +497,9 @@ public final class EcuToolsDialog {
 
                     String compact = compactHex(response);
 
-                    if (compact.contains("54")) {
+                    // Firmware proves the normal clear-all positive response is
+                    // exactly 54 00 00. Do not accept an unrelated 0x54 byte.
+                    if (compact.contains("540000")) {
                         dtcResult.setText(
                                 "ECU acknowledged clear request.\n" +
                                 "Re-reading fault codes…"
@@ -527,6 +529,20 @@ public final class EcuToolsDialog {
         if (shareProtocolLog != null) shareProtocolLog.setEnabled(!busy);
     }
 
+    /**
+     * Decode the Bandit/Denso service 0x18 response using the record format
+     * proven from the 18H00-family firmware:
+     *
+     *   58 NN [HH LL SS]...
+     *
+     * NN is the number of records. Each record is exactly three bytes:
+     * a literal 16-bit Suzuki diagnostic number plus a Suzuki/Denso status
+     * byte. The number is NOT generic SAE P/C/B/U packed-bit encoding.
+     *
+     * Status interpretation currently proven:
+     *   bit 6 (0x40) set -> fault condition is currently active
+     *   bits 1:0        -> subtype value 0..2; exact human meaning not proven
+     */
     private String describeDtcResponse(String response) {
         String nrc = EcuMemoryReader.negativeResponseExplanation(response, 0x18);
 
@@ -545,82 +561,105 @@ public final class EcuToolsDialog {
 
         String payload = hex.substring(p + 2);
 
-        if ((payload.length() & 1) != 0) {
-            payload = payload.substring(0, payload.length() - 1);
+        if (payload.length() < 2) {
+            return "Short 0x58 response: missing DTC count byte.\n" +
+                    "Raw: " + oneLine(response);
         }
 
-        ArrayList<Integer> bytes = new ArrayList<>();
-
+        final int count;
         try {
-            for (int i = 0; i + 1 < payload.length(); i += 2) {
-                bytes.add(Integer.parseInt(payload.substring(i, i + 2), 16));
-            }
+            count = Integer.parseInt(payload.substring(0, 2), 16);
         } catch (NumberFormatException e) {
-            return "Could not decode DTC payload.\nRaw: " + oneLine(response);
+            return "Could not decode DTC count byte.\nRaw: " + oneLine(response);
         }
 
-        int offset = 0;
-        Integer reportedCount = null;
-
-        if (bytes.size() >= 1 && ((bytes.size() - 1) % 3 == 0)) {
-            reportedCount = bytes.get(0);
-            offset = 1;
-        }
+        int availableDataBytes = Math.max(0, (payload.length() - 2) / 2);
+        int availableRecords = availableDataBytes / 3;
+        int recordsToDecode = Math.min(count, availableRecords);
+        int expectedDataBytes = count * 3;
 
         StringBuilder out = new StringBuilder();
-        out.append("Engine ECU DTC response\n");
+        out.append("Engine ECU fault codes\n");
+        out.append("Reported count: ").append(count).append("\n");
 
-        if (reportedCount != null) {
-            out.append("Reported count: ")
-                    .append(reportedCount)
-                    .append("\n");
+        if (count == 0) {
+            out.append("No stored/reportable engine ECU fault codes.\n");
         }
 
-        int decoded = 0;
+        for (int record = 0; record < recordsToDecode; record++) {
+            int charIndex = 2 + (record * 6);
 
-        for (int i = offset; i + 2 < bytes.size(); i += 3) {
-            int hi = bytes.get(i);
-            int lo = bytes.get(i + 1);
-            int status = bytes.get(i + 2);
-            int code = (hi << 8) | lo;
+            try {
+                int hi = Integer.parseInt(
+                        payload.substring(charIndex, charIndex + 2), 16
+                );
+                int lo = Integer.parseInt(
+                        payload.substring(charIndex + 2, charIndex + 4), 16
+                );
+                int status = Integer.parseInt(
+                        payload.substring(charIndex + 4, charIndex + 6), 16
+                );
 
-            if (code == 0 && status == 0) continue;
+                int code = (hi << 8) | lo;
+                boolean current = (status & 0x40) != 0;
+                int subtype = status & 0x03;
 
-            out.append(decodeStandardDtc(code))
-                    .append("   raw ")
-                    .append(String.format(Locale.US, "%02X %02X", hi, lo))
-                    .append("   status ")
-                    .append(String.format(Locale.US, "%02X", status))
-                    .append("\n");
-            decoded++;
+                out.append("\n")
+                        .append(formatSuzukiDtc(code))
+                        .append("\n")
+                        .append("  State: ")
+                        .append(current
+                                ? "Current"
+                                : "Stored / not currently active")
+                        .append("\n")
+                        .append("  Raw DTC: ")
+                        .append(String.format(Locale.US, "%04X", code))
+                        .append("\n")
+                        .append("  Raw status: ")
+                        .append(String.format(Locale.US, "%02X", status))
+                        .append("\n")
+                        .append("  Subtype: ")
+                        .append(subtype)
+                        .append(" [Experimental]\n");
+
+            } catch (IndexOutOfBoundsException | NumberFormatException e) {
+                out.append("\nRecord ")
+                        .append(record + 1)
+                        .append(": decode error\n");
+                break;
+            }
         }
 
-        if (decoded == 0) {
-            out.append("No decodable DTC tuples in this response.\n");
+        if (availableDataBytes != expectedDataBytes) {
+            out.append("\nWARNING: firmware format predicts ")
+                    .append(expectedDataBytes)
+                    .append(" DTC data bytes for count ")
+                    .append(count)
+                    .append(", but ")
+                    .append(availableDataBytes)
+                    .append(" complete byte(s) were present after the count.");
         }
 
-        out.append("\nRaw: ").append(oneLine(response));
+        if (count > availableRecords) {
+            out.append("\nWARNING: response is too short for all reported records.");
+        }
+
+        out.append("\n\nRaw: ").append(oneLine(response));
         out.append(
-                "\n\nNote: code/status interpretation remains provisional " +
-                "until fully verified against the Bandit's Suzuki SDS format."
+                "\n\nDecoder basis: firmware-proven 58 NN [HH LL SS] records. " +
+                "Status bit 0x40 = currently active. The low two status bits are " +
+                "shown as a subtype, but subtype 1/2 meanings are not yet proven."
         );
 
         return out.toString();
     }
 
-    private String decodeStandardDtc(int code) {
-        char[] family = {'P', 'C', 'B', 'U'};
-        char prefix = family[(code >> 14) & 0x03];
-        int firstDigit = (code >> 12) & 0x03;
-        int rest = code & 0x0FFF;
-
-        return String.format(
-                Locale.US,
-                "%c%d%03X",
-                prefix,
-                firstDigit,
-                rest
-        );
+    /**
+     * The firmware stores the diagnostic number literally (for example
+     * 0x0105, 0x0335, 0x1750). "P" is the human display/correlation prefix.
+     */
+    private String formatSuzukiDtc(int code) {
+        return String.format(Locale.US, "P%04X", code & 0xFFFF);
     }
 
     // -----------------------------------------------------------------
