@@ -146,7 +146,7 @@ public final class MainActivity extends Activity {
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("Bandit Monitor V0.21.0");
+        title.setText("Bandit Monitor V0.22.0");
         title.setTextSize(20);
         title.setTypeface(null, Typeface.BOLD);
         title.setSingleLine(true);
