@@ -16,6 +16,7 @@ import java.util.Locale;
  * Current contents:
  * - ELM message-length limit test
  * - Denso / K-line read-only compatibility test
+ * - firmware-proven engineering page browser
  * - Protocol Lab
  *
  * Legacy dead ends such as the 0x30 service/ID sweep, safe ECU discovery and
@@ -28,6 +29,7 @@ public final class DevToolsDialog {
     private TextView result;
     private Button elmLengthTest;
     private Button densoReadOnlyTest;
+    private Button engineeringPages;
     private Button protocolLab;
     private Button shareLog;
 
@@ -61,6 +63,13 @@ public final class DevToolsDialog {
         densoReadOnlyTest.setText("K-LINE READ-ONLY TEST");
         densoReadOnlyTest.setOnClickListener(v -> confirmDensoReadOnlyTest());
         box.addView(densoReadOnlyTest);
+
+        engineeringPages = new Button(activity);
+        engineeringPages.setText("ENGINEERING DATA PAGES");
+        engineeringPages.setOnClickListener(v ->
+                new EngineeringPageBrowserDialog(activity).show()
+        );
+        box.addView(engineeringPages);
 
         protocolLab = new Button(activity);
         protocolLab.setText("PROTOCOL LAB");
@@ -238,6 +247,7 @@ public final class DevToolsDialog {
     private void setBusy(boolean busy) {
         if (elmLengthTest != null) elmLengthTest.setEnabled(!busy);
         if (densoReadOnlyTest != null) densoReadOnlyTest.setEnabled(!busy);
+        if (engineeringPages != null) engineeringPages.setEnabled(!busy);
         if (protocolLab != null) protocolLab.setEnabled(!busy);
         if (shareLog != null) shareLog.setEnabled(!busy);
     }
