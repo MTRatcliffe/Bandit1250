@@ -860,9 +860,16 @@ public final class MainActivity extends Activity {
         try {
             BanditLiveData d = BanditDecoder.decode(response);
 
-            double estimatedLph = FuelCalculator.estimatedLitresPerHour(
+            // Apply dead-time correction independently to each injector,
+            // calculate each cylinder's fuel contribution, then sum all four.
+            // This avoids average-first errors when one pulse is near the
+            // short-pulse/dead-time clamp.
+            double estimatedLph = FuelCalculator.estimatedFourInjectorLitresPerHour(
                     d.rpm,
-                    d.averageMs,
+                    d.inj1,
+                    d.inj2,
+                    d.inj3,
+                    d.inj4,
                     injectorFlowCcMin,
                     netLatencyMs,
                     calibrationFactor
