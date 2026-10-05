@@ -718,7 +718,23 @@ public final class MainActivity extends Activity {
                 ui.post(() -> setStatusYellow("BT: OK • SDS: …"));
 
                 sds = new SuzukiSds(elm, this::appendLog);
+
+                // Keep the protocol CSV listener attached for the entire SDS
+                // connection so the shared log contains the complete session:
+                // ELM/SDS initialisation, normal 21 08 polling, diagnostics,
+                // engineering pages and protocol-lab traffic.
+                if (protocolLogger != null) {
+                    protocolLogger.setOperation("SDS session");
+                    sds.setTransactionListener(protocolLogger::record);
+                }
+
                 sds.initialise();
+
+                // Blank means normal/background session traffic. Exclusive
+                // tools temporarily replace this with a descriptive label.
+                if (protocolLogger != null) {
+                    protocolLogger.setOperation("");
+                }
 
                 long t0 = SystemClock.elapsedRealtime();
                 String first = sds.read2108();
@@ -1263,9 +1279,12 @@ public final class MainActivity extends Activity {
             Exception failure = null;
 
             try {
+                // The transaction listener is attached for the full SDS
+                // connection. Here we only tag these rows with the operation
+                // name; this preserves continuous logging before and after the
+                // exclusive tool runs.
                 if (protocolLogger != null) {
                     protocolLogger.setOperation(label);
-                    sds.setTransactionListener(protocolLogger::record);
                 }
 
                 result = action.run(sds);
@@ -1274,10 +1293,6 @@ public final class MainActivity extends Activity {
                 failure = e;
 
             } finally {
-                try {
-                    sds.setTransactionListener(null);
-                } catch (Exception ignored) {}
-
                 if (protocolLogger != null) {
                     protocolLogger.setOperation("");
                 }
