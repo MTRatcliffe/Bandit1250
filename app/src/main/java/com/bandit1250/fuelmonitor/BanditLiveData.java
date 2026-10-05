@@ -10,6 +10,7 @@ public final class BanditLiveData {
     public final double engineTempC;
     public final double intakeTempC;
     public final int eapRaw;
+    public final int batteryRaw;
     public final double batteryEstV;
     public final int o2Raw;
     public final int gearRaw;
@@ -37,6 +38,7 @@ public final class BanditLiveData {
             double engineTempC,
             double intakeTempC,
             int eapRaw,
+            int batteryRaw,
             double batteryEstV,
             int o2Raw,
             int gearRaw,
@@ -66,6 +68,7 @@ public final class BanditLiveData {
         this.engineTempC = engineTempC;
         this.intakeTempC = intakeTempC;
         this.eapRaw = eapRaw;
+        this.batteryRaw = batteryRaw;
         this.batteryEstV = batteryEstV;
         this.o2Raw = o2Raw;
         this.gearRaw = gearRaw;
