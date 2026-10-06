@@ -93,13 +93,20 @@ public final class DiagnosticsPanel {
     private final ArrayList<Sample> history = new ArrayList<>();
     private final ArrayList<Integer> order = new ArrayList<>();
 
+    private static final String DEFAULT_NOTE =
+            "Min / Max follow the selected time window. " +
+            "FIX uses a sensible diagnostic scale; AUTO zooms to the data.";
+
     private final Button b10;
     private final Button b60;
     private final Button b300;
     private final Button bMax;
+    private final TextView note;
+    private final Button returnLive;
 
     private long windowMs = 10_000L;
     private long lastRefreshMs = 0L;
+    private boolean frozenFastCapture = false;
 
     private static final class RowViews {
         final int metricIndex;
@@ -162,12 +169,15 @@ public final class DiagnosticsPanel {
 
         root.addView(controls);
 
-        TextView note = text(
-                "Min / Max follow the selected time window. " +
-                "FIX uses a sensible diagnostic scale; AUTO zooms to the data."
-        );
+        note = text(DEFAULT_NOTE);
         note.setTextSize(11);
         root.addView(note);
+
+        returnLive = new Button(activity);
+        returnLive.setText("RETURN TO LIVE CHARTS");
+        returnLive.setVisibility(View.GONE);
+        returnLive.setOnClickListener(v -> resumeLiveCharts());
+        root.addView(returnLive);
 
         rows = new LinearLayout(activity);
         rows.setOrientation(LinearLayout.VERTICAL);
@@ -192,11 +202,77 @@ public final class DiagnosticsPanel {
 
     public void resetSession() {
         history.clear();
+        frozenFastCapture = false;
+        windowMs = 10_000L;
         lastRefreshMs = 0L;
+        note.setText(DEFAULT_NOTE);
+        returnLive.setVisibility(View.GONE);
+        updateWindowButtons();
         refresh(true);
     }
 
+    /**
+     * Add an ordinary live sample.  While a completed FAST CAPTURE is being
+     * inspected, live polling deliberately does not alter the frozen trace.
+     * RETURN TO LIVE CHARTS clears the capture and starts a fresh live history.
+     */
     public void addSample(BanditLiveData d) {
+        if (frozenFastCapture) return;
+
+        history.add(makeSample(SystemClock.elapsedRealtime(), d));
+
+        if (root.getVisibility() == View.VISIBLE) {
+            refresh(false);
+        }
+    }
+
+    /**
+     * Replace the diagnostic chart history with an exact timestamped fast
+     * capture.  The caller bulk-adds samples with addFastCaptureSample(), then
+     * calls finishFastCaptureDisplay().  No chart redraw occurs during bulk
+     * insertion, so hundreds of high-rate samples can be loaded cheaply.
+     */
+    public void beginFastCaptureDisplay() {
+        history.clear();
+        frozenFastCapture = true;
+        lastRefreshMs = 0L;
+    }
+
+    public void addFastCaptureSample(long timeMs, BanditLiveData d) {
+        history.add(makeSample(timeMs, d));
+    }
+
+    public void finishFastCaptureDisplay(String summary) {
+        frozenFastCapture = true;
+
+        // MAX means the entire 30 s capture is shown, with no point thinning at
+        // the expected ELM sample count.  The normal 10 s / 1 min / 5 min
+        // buttons remain available for closer inspection.
+        windowMs = -1L;
+        updateWindowButtons();
+
+        note.setText(
+                (summary == null ? "FAST CAPTURE complete." : summary) +
+                "\nFrozen high-resolution capture. Live polling continues in " +
+                "the background but will not overwrite these charts."
+        );
+        returnLive.setVisibility(View.VISIBLE);
+        root.setVisibility(View.VISIBLE);
+        refresh(true);
+    }
+
+    private void resumeLiveCharts() {
+        frozenFastCapture = false;
+        history.clear();
+        windowMs = 10_000L;
+        lastRefreshMs = 0L;
+        note.setText(DEFAULT_NOTE);
+        returnLive.setVisibility(View.GONE);
+        updateWindowButtons();
+        refresh(true);
+    }
+
+    private Sample makeSample(long timeMs, BanditLiveData d) {
         float[] v = new float[METRICS.length];
 
         v[0] = d.rpm;
@@ -228,11 +304,7 @@ public final class DiagnosticsPanel {
         v[26] = d.clutchStarterRaw;
         v[27] = d.neutralRaw;
 
-        history.add(new Sample(SystemClock.elapsedRealtime(), v));
-
-        if (root.getVisibility() == View.VISIBLE) {
-            refresh(false);
-        }
+        return new Sample(timeMs, v);
     }
 
     private float f(double value) {
