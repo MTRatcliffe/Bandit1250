@@ -52,6 +52,10 @@ public final class MainActivity extends Activity {
     private volatile double gpsAccuracyM = Double.NaN;
     private volatile double lastEstimatedLph = Double.NaN;
     private volatile long lastPollDurationMs = -1;
+    // Latest successfully decoded 21 08 sample. Active-control screens use
+    // this read-only snapshot for live verification while normal polling
+    // continues; they never write through it.
+    private volatile BanditLiveData lastLiveData;
 
     private double injectorFlowCcMin = 220.0;
     private double calibrationFactor = 1.000;
@@ -901,6 +905,7 @@ public final class MainActivity extends Activity {
     private void decodeAndShow(String response) {
         try {
             BanditLiveData d = BanditDecoder.decode(response);
+            lastLiveData = d;
 
             // SDS 21 08 reports final ELECTRICAL injector ON-time.
             // Firmware analysis shows battery-voltage injector latency is added
@@ -1343,6 +1348,10 @@ public final class MainActivity extends Activity {
                 pollLoop();
             }
         });
+    }
+
+    BanditLiveData getLastLiveData() {
+        return lastLiveData;
     }
 
     File getProtocolLogFile() {
