@@ -258,7 +258,33 @@ public final class EngineeringPageBrowserDialog {
         if (page == 0x90 && payload.length >= 8) {
             out.append("Firmware/software ID: ")
                     .append(ascii(payload, 0, 8))
-                    .append("  [PROVEN]\n");
+                    .append("  [PROVEN LIVE]\n");
+
+            if (payload.length >= 0x28) {
+                out.append("\nADC channels [PROVEN FIRMWARE]\n");
+                int[] adc = GuidedTestSupport.page90AdcCounts(payload);
+                for (int ch = 0; ch < adc.length; ch++) {
+                    out.append(String.format(
+                            Locale.US,
+                            "  ADC%-2d %4d counts\n",
+                            ch,
+                            adc[ch]
+                    ));
+                }
+            }
+        }
+
+        if (page >= 0x40 && page <= 0x45) {
+            out.append("Diagnostic monitor snapshot bank 0 [PROVEN FIRMWARE]\n");
+        } else if (page >= 0x50 && page <= 0x55) {
+            out.append("Diagnostic monitor snapshot bank 1 [PROVEN FIRMWARE]\n");
+        } else if ((page >= 0x46 && page <= 0x4F) ||
+                (page >= 0x56 && page <= 0x5F)) {
+            out.append("Implemented placeholder page; all-FF is expected [PROVEN FIRMWARE]\n");
+        } else if (page == 0x80) {
+            out.append("100-byte internal engineering/live-state page [PROVEN FIRMWARE]\n");
+        } else if (page == 0xC0) {
+            out.append("60-byte curated engineering/live-state page [PROVEN FIRMWARE]\n");
         }
 
         out.append("\nRaw RX:\n")
@@ -332,8 +358,29 @@ public final class EngineeringPageBrowserDialog {
 
     private static String meaning(int page, int offset) {
         if (page == 0x90 && offset < 8) {
-            return "Firmware/software ID byte [PROVEN]";
+            return "Firmware/software ID byte [PROVEN LIVE]";
         }
+
+        if (page == 0x90 && offset >= 0x08 && offset <= 0x27) {
+            int ch = (offset - 0x08) / 2;
+            boolean high = ((offset - 0x08) & 1) == 0;
+
+            return String.format(
+                    Locale.US,
+                    "ADC%d %s byte; BE16/64 = count [PROVEN FIRMWARE]",
+                    ch,
+                    high ? "high" : "low"
+            );
+        }
+
+        if (page >= 0x46 && page <= 0x4F) {
+            return "Placeholder / expected FF";
+        }
+
+        if (page >= 0x56 && page <= 0x5F) {
+            return "Placeholder / expected FF";
+        }
+
         return "Unknown / raw";
     }
 
