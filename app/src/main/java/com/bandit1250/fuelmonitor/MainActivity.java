@@ -204,7 +204,7 @@ public final class MainActivity extends Activity {
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("Bandit Monitor V0.25.0-test");
+        title.setText("Bandit Monitor V0.26.0-test");
         title.setTextSize(20);
         title.setTypeface(null, Typeface.BOLD);
         title.setSingleLine(true);
@@ -231,7 +231,7 @@ public final class MainActivity extends Activity {
                 "CONNECT performs Bluetooth connection, SDS initialisation and continuous polling.\n" +
                 "Tap 📈 beside Live ECU data to show/hide the full diagnostics chart stack.\n" +
                 "Tap ⚙ beside Fuel L/h to edit injector flow and tank calibration factor.\n" +
-                "ACTIVE opens firmware-derived A5 controls; GUIDED runs logged diagnostic workflows; ENG opens raw engineering pages.\n" +
+                "FAST 30 s CAPTURE pauses normal display updates and records 21 08 at the maximum practical ELM rate, then freezes the result in the chart stack.\n" +\n                "ACTIVE opens firmware-derived A5 controls; GUIDED runs logged diagnostic workflows; ENG opens raw engineering pages.\n" +
                 "Injector latency is automatically interpolated from the ECU battery raw byte using the firmware-derived table."
         );
         infoText.setVisibility(View.GONE);
