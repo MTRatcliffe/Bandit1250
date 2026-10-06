@@ -8,11 +8,12 @@ import java.util.Date;
 import java.util.Locale;
 
 /**
- * CSV logger for exclusive ECU/protocol-tool operations.
+ * CSV logger for the complete connected SDS session.
  *
- * Live 21 08 polling is deliberately NOT logged here. MainActivity enables
- * SuzukiSds transaction capture only while an exclusive ECU tool is running,
- * keeping the file compact and focused on experiments we want to analyse.
+ * MainActivity attaches this to SuzukiSds before initialisation, so the file
+ * contains ELM setup, normal 21 08 polling, ECU tools, engineering pages and
+ * guided diagnostic traffic. The operation field adds higher-level phase
+ * labels during experiments.
  */
 public final class ProtocolSessionLogger {
     private final File file;
