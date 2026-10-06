@@ -146,7 +146,7 @@ public final class MainActivity extends Activity {
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("Bandit Monitor V0.23.0-test");
+        title.setText("Bandit Monitor V0.24.0-test");
         title.setTextSize(20);
         title.setTypeface(null, Typeface.BOLD);
         title.setSingleLine(true);
@@ -173,6 +173,7 @@ public final class MainActivity extends Activity {
                 "CONNECT performs Bluetooth connection, SDS initialisation and continuous polling.\n" +
                 "Tap 📈 beside Live ECU data to show/hide the full diagnostics chart stack.\n" +
                 "Tap ⚙ beside Fuel L/h to edit injector flow and tank calibration factor.\n" +
+                "ACTIVE opens firmware-derived A5 controls; GUIDED runs logged diagnostic workflows; ENG opens raw engineering pages.\n" +
                 "Injector latency is automatically interpolated from the ECU battery raw byte using the firmware-derived table."
         );
         infoText.setVisibility(View.GONE);
@@ -288,6 +289,32 @@ public final class MainActivity extends Activity {
         liveHeadRow.addView(ecuTools);
 
         root.addView(liveHeadRow);
+
+        // ----- Firmware-derived diagnostic tools -----
+        LinearLayout advancedToolsRow = row();
+
+        Button activeControls = new Button(this);
+        activeControls.setText("ACTIVE");
+        activeControls.setOnClickListener(v ->
+                new ActiveControlsDialog(this).show()
+        );
+        advancedToolsRow.addView(activeControls, weight());
+
+        Button guidedDiagnostics = new Button(this);
+        guidedDiagnostics.setText("GUIDED");
+        guidedDiagnostics.setOnClickListener(v ->
+                new GuidedDiagnosticsDialog(this).show()
+        );
+        advancedToolsRow.addView(guidedDiagnostics, weight());
+
+        Button engineeringData = new Button(this);
+        engineeringData.setText("ENG");
+        engineeringData.setOnClickListener(v ->
+                new EngineeringPageBrowserDialog(this).show()
+        );
+        advancedToolsRow.addView(engineeringData, weight());
+
+        root.addView(advancedToolsRow);
 
         diagnosticsPanel = new DiagnosticsPanel(this, prefs, sv);
         root.addView(diagnosticsPanel.getView());
@@ -748,6 +775,7 @@ public final class MainActivity extends Activity {
                     updateConnectedStatus();
                     connect.setText("RECONNECT");
                     connect.setEnabled(true);
+                    maybePromptPendingA5Release();
                 });
 
                 pollLoop();
@@ -1335,6 +1363,122 @@ public final class MainActivity extends Activity {
                 "Bandit 1250 protocol log " + (file == null ? "" : file.getName()),
                 "Share protocol CSV"
         );
+    }
+
+    void shareGuidedLog(File file) {
+        shareInternalFile(
+                file,
+                "text/csv",
+                "Bandit 1250 guided diagnostic " +
+                        (file == null ? "" : file.getName()),
+                "Share guided diagnostic CSV"
+        );
+    }
+
+    void setProtocolOperationLabel(String label) {
+        if (protocolLogger != null) {
+            protocolLogger.setOperation(label == null ? "" : label);
+        }
+    }
+
+    private void maybePromptPendingA5Release() {
+        if (prefs == null ||
+                !prefs.getBoolean("a5_pending_release", false)) {
+            return;
+        }
+
+        String label = prefs.getString(
+                "a5_pending_label",
+                "previous A5 active control"
+        );
+        String release = prefs.getString(
+                "a5_pending_release_cmd",
+                ""
+        );
+
+        if (release == null || release.isEmpty()) {
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Previous active-control session")
+                .setMessage(
+                        "The previous app session ended while an A5 override was " +
+                        "recorded as active:\n\n" +
+                        label + "\n\n" +
+                        "Release packet: " + spacedHex(release) + "\n\n" +
+                        "Release it now?"
+                )
+                .setNegativeButton("Leave for now", null)
+                .setPositiveButton("Release now", (d, w) ->
+                        releaseRecordedA5Override(label, release)
+                )
+                .show();
+    }
+
+    private void releaseRecordedA5Override(
+            String label,
+            String release
+    ) {
+        runExclusiveSdsTask(
+                "Recover / release " + label,
+                sds -> sds.requestRaw(release + " 1", 5000),
+                (response, error) -> {
+                    if (error != null) {
+                        toast(
+                                "Release attempt failed: " +
+                                error.getMessage()
+                        );
+                        return;
+                    }
+
+                    String hex = response == null
+                            ? ""
+                            : response.toUpperCase(Locale.US)
+                            .replaceAll("[^0-9A-F]", "");
+
+                    int mode = -1;
+                    try {
+                        String command = release.toUpperCase(Locale.US)
+                                .replaceAll("[^0-9A-F]", "");
+                        if (command.length() >= 4) {
+                            mode = Integer.parseInt(
+                                    command.substring(2, 4),
+                                    16
+                            );
+                        }
+                    } catch (Exception ignored) {}
+
+                    boolean accepted = mode >= 0 &&
+                            hex.contains(String.format(
+                                    Locale.US,
+                                    "E5%02X",
+                                    mode
+                            ));
+
+                    if (accepted) {
+                        prefs.edit()
+                                .putBoolean("a5_pending_release", false)
+                                .remove("a5_pending_label")
+                                .remove("a5_pending_release_cmd")
+                                .remove("a5_pending_since")
+                                .apply();
+                        toast("A5 override released: " + label);
+                    } else {
+                        toast(
+                                "Release response not verified. Check protocol log: " +
+                                response
+                        );
+                    }
+                }
+        );
+    }
+
+    private String spacedHex(String value) {
+        if (value == null) return "";
+        String compact = value.toUpperCase(Locale.US)
+                .replaceAll("[^0-9A-F]", "");
+        return compact.replaceAll("(.{2})(?!$)", "$1 ");
     }
 
     private void shareInternalFile(
