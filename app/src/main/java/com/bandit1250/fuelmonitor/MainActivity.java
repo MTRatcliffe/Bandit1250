@@ -27,6 +27,7 @@ public final class MainActivity extends Activity {
     private static final double MIN_MPG_SPEED_MPH = 3.0;
     private static final long MPG_WINDOW_MS = 10_000L;
     private static final long HISTORY_WINDOW_MS = 120_000L;
+    private static final long FAST_CAPTURE_MS = 30_000L;
 
     private static final int STATUS_RED = Color.rgb(190, 0, 0);
     private static final int STATUS_YELLOW = Color.rgb(180, 130, 0);
@@ -83,7 +84,9 @@ public final class MainActivity extends Activity {
 
     private Button deviceButton;
     private Button connect;
+    private Button fastCaptureButton;
 
+    private volatile boolean fastCaptureActive = false;
     private long lastHistorySampleMs = 0;
 
     private static final class MpgSample {
@@ -95,6 +98,57 @@ public final class MainActivity extends Activity {
             this.timeMs = timeMs;
             this.speedMph = speedMph;
             this.lph = lph;
+        }
+    }
+
+    /**
+     * One decoded sample from the no-delay 30 second capture.
+     *
+     * timeMs uses SystemClock.elapsedRealtime(), matching DiagnosticsPanel's
+     * normal chart timestamps. requestMs is retained so the completed run can
+     * report the real adapter/ECU response-time distribution.
+     */
+    private static final class FastCaptureSample {
+        final long timeMs;
+        final long requestMs;
+        final BanditLiveData data;
+
+        FastCaptureSample(long timeMs, long requestMs, BanditLiveData data) {
+            this.timeMs = timeMs;
+            this.requestMs = requestMs;
+            this.data = data;
+        }
+    }
+
+    private static final class FastCaptureResult {
+        final ArrayList<FastCaptureSample> samples = new ArrayList<>();
+        long durationMs;
+        int rejectedFrames;
+
+        double sampleRateHz() {
+            if (durationMs <= 0L) return Double.NaN;
+            return samples.size() / (durationMs / 1000.0);
+        }
+
+        double averageRequestMs() {
+            if (samples.isEmpty()) return Double.NaN;
+            long total = 0L;
+            for (FastCaptureSample s : samples) total += s.requestMs;
+            return total / (double)samples.size();
+        }
+
+        long minRequestMs() {
+            if (samples.isEmpty()) return -1L;
+            long min = Long.MAX_VALUE;
+            for (FastCaptureSample s : samples) min = Math.min(min, s.requestMs);
+            return min;
+        }
+
+        long maxRequestMs() {
+            if (samples.isEmpty()) return -1L;
+            long max = Long.MIN_VALUE;
+            for (FastCaptureSample s : samples) max = Math.max(max, s.requestMs);
+            return max;
         }
     }
 
@@ -319,6 +373,16 @@ public final class MainActivity extends Activity {
         advancedToolsRow.addView(engineeringData, weight());
 
         root.addView(advancedToolsRow);
+
+        // FAST CAPTURE deliberately stops normal UI/chart updates for 30 s and
+        // sends 21 08 again immediately after each ELM reply.  This removes the
+        // normal 120 ms inter-poll sleep and avoids chart rendering in the hot
+        // path.  The completed high-resolution trace is loaded into the normal
+        // diagnostics chart stack afterwards.
+        fastCaptureButton = new Button(this);
+        fastCaptureButton.setText("FAST 30 s CAPTURE");
+        fastCaptureButton.setOnClickListener(v -> startFastCapture());
+        root.addView(fastCaptureButton);
 
         diagnosticsPanel = new DiagnosticsPanel(this, prefs, sv);
         root.addView(diagnosticsPanel.getView());
@@ -839,6 +903,172 @@ public final class MainActivity extends Activity {
                 }
             }
         }
+    }
+
+    private void startFastCapture() {
+        if (fastCaptureActive) return;
+
+        if (sds == null || elm == null || !elm.isConnected()) {
+            toast("Connect to the Bandit ECU first.");
+            return;
+        }
+
+        fastCaptureActive = true;
+        fastCaptureButton.setEnabled(false);
+        fastCaptureButton.setText("FAST CAPTURE 0/30 s");
+        connect.setEnabled(false);
+
+        /*
+         * runExclusiveSdsTask stops the ordinary pollLoop before this starts,
+         * so no 21 08 requests can be interleaved on the K-Line.
+         *
+         * We intentionally use requestRaw("2108 1") rather than read2108():
+         * - one request = one sample attempt;
+         * - no 120 ms MainActivity sleep;
+         * - no multi-stage retry/re-init delay inside each sample;
+         * - the normal SDS transaction listener still records every request in
+         *   the protocol CSV under the FAST 30 s capture operation label.
+         *
+         * This is read-only.  No A5/clear/adaptation command is sent.
+         */
+        runExclusiveSdsTask(
+                "FAST 30 s capture",
+                activeSds -> performFastCapture(activeSds),
+                (result, error) -> {
+                    fastCaptureActive = false;
+                    fastCaptureButton.setEnabled(true);
+                    fastCaptureButton.setText("FAST 30 s CAPTURE");
+                    connect.setEnabled(true);
+
+                    if (error != null) {
+                        setStatusYellow("BT: OK • FAST CAPTURE failed");
+                        toast("Fast capture failed: " + error.getMessage());
+                        return;
+                    }
+
+                    if (result == null || result.samples.isEmpty()) {
+                        setStatusYellow("BT: OK • FAST CAPTURE empty");
+                        toast("Fast capture completed but no valid 21 08 samples were decoded.");
+                        return;
+                    }
+
+                    diagnosticsPanel.beginFastCaptureDisplay();
+                    for (FastCaptureSample sample : result.samples) {
+                        diagnosticsPanel.addFastCaptureSample(
+                                sample.timeMs,
+                                sample.data
+                        );
+                    }
+
+                    String summary = String.format(
+                            Locale.UK,
+                            "FAST CAPTURE • %.1f s • %d valid samples • %.2f Hz • " +
+                            "request %.0f ms avg (%d–%d ms) • %d rejected",
+                            result.durationMs / 1000.0,
+                            result.samples.size(),
+                            result.sampleRateHz(),
+                            result.averageRequestMs(),
+                            result.minRequestMs(),
+                            result.maxRequestMs(),
+                            result.rejectedFrames
+                    );
+
+                    diagnosticsPanel.finishFastCaptureDisplay(summary);
+
+                    // Put the completed trace in view automatically.  It is
+                    // frozen, so the resumed background polling cannot dilute
+                    // the high-resolution 30 second capture.
+                    mainScroll.post(() ->
+                            mainScroll.smoothScrollTo(
+                                    0,
+                                    diagnosticsPanel.getView().getTop()
+                            )
+                    );
+
+                    toast(String.format(
+                            Locale.UK,
+                            "Fast capture complete: %d samples at %.2f Hz",
+                            result.samples.size(),
+                            result.sampleRateHz()
+                    ));
+                }
+        );
+    }
+
+    private FastCaptureResult performFastCapture(SuzukiSds activeSds)
+            throws Exception {
+        FastCaptureResult result = new FastCaptureResult();
+
+        long startNs = SystemClock.elapsedRealtimeNanos();
+        long deadlineNs = startNs + FAST_CAPTURE_MS * 1_000_000L;
+        int lastProgressSecond = -1;
+
+        while (fastCaptureActive &&
+                SystemClock.elapsedRealtimeNanos() < deadlineNs) {
+
+            long requestStartNs = SystemClock.elapsedRealtimeNanos();
+            String response = activeSds.requestRaw("2108 1", 1500L);
+            long requestEndNs = SystemClock.elapsedRealtimeNanos();
+
+            long requestMs = Math.max(
+                    0L,
+                    (requestEndNs - requestStartNs) / 1_000_000L
+            );
+
+            try {
+                BanditLiveData data = BanditDecoder.decode(response);
+
+                result.samples.add(new FastCaptureSample(
+                        requestEndNs / 1_000_000L,
+                        requestMs,
+                        data
+                ));
+
+            } catch (RuntimeException badFrame) {
+                // A prompt/NO DATA/partial frame is counted rather than ending
+                // the whole test.  The raw transaction is still in protocol CSV.
+                result.rejectedFrames++;
+            }
+
+            long elapsedMs =
+                    (requestEndNs - startNs) / 1_000_000L;
+            int wholeSecond = (int)Math.min(
+                    FAST_CAPTURE_MS / 1000L,
+                    elapsedMs / 1000L
+            );
+
+            // One tiny progress update per second is deliberately the only UI
+            // work done while capturing.  The sensor table and charts are not
+            // redrawn until all 30 seconds have finished.
+            if (wholeSecond != lastProgressSecond) {
+                lastProgressSecond = wholeSecond;
+
+                final int progress = wholeSecond;
+                final int count = result.samples.size();
+                final double hz = elapsedMs > 0
+                        ? count / (elapsedMs / 1000.0)
+                        : 0.0;
+
+                ui.post(() -> {
+                    fastCaptureButton.setText(
+                            "FAST CAPTURE " + progress + "/30 s"
+                    );
+                    setStatusYellow(String.format(
+                            Locale.UK,
+                            "FAST CAPTURE • %d/30 s • %.2f Hz",
+                            progress,
+                            hz
+                    ));
+                });
+            }
+        }
+
+        result.durationMs = Math.max(
+                0L,
+                (SystemClock.elapsedRealtimeNanos() - startNs) / 1_000_000L
+        );
+
+        return result;
     }
 
     // ---------------------------------------------------------------------
@@ -1542,6 +1772,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         polling = false;
+        fastCaptureActive = false;
 
         if (elm != null) elm.close();
 
