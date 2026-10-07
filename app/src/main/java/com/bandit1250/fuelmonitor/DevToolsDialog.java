@@ -31,6 +31,7 @@ public final class DevToolsDialog {
     private Button densoReadOnlyTest;
     private Button engineeringPages;
     private Button protocolLab;
+    private Button crankRamRead;
     private Button shareLog;
 
     public DevToolsDialog(MainActivity activity) {
@@ -75,6 +76,11 @@ public final class DevToolsDialog {
         protocolLab.setText("PROTOCOL LAB");
         protocolLab.setOnClickListener(v -> new ProtocolLabDialog(activity).show());
         box.addView(protocolLab);
+
+        crankRamRead = new Button(activity);
+        crankRamRead.setText("WHITELISTED RAM / CRANK READ");
+        crankRamRead.setOnClickListener(v -> new CrankRamReadDialog(activity).show());
+        box.addView(crankRamRead);
 
         result = mono(lastDevSummary());
         result.setPadding(0, dp(8), 0, dp(10));
@@ -249,6 +255,7 @@ public final class DevToolsDialog {
         if (densoReadOnlyTest != null) densoReadOnlyTest.setEnabled(!busy);
         if (engineeringPages != null) engineeringPages.setEnabled(!busy);
         if (protocolLab != null) protocolLab.setEnabled(!busy);
+        if (crankRamRead != null) crankRamRead.setEnabled(!busy);
         if (shareLog != null) shareLog.setEnabled(!busy);
     }
 
