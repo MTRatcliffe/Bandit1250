@@ -37,7 +37,7 @@ public final class GuidedDiagnosticsDialog {
         intro.setTextSize(12);
         box.addView(intro);
 
-        addButton(box, "TPS SWEEP", this::confirmTpsSweep);
+        addButton(box, "FAST / ADVANCED DIAGNOSTICS", () ->\n                new AdvancedDiagnosticsDialog(activity).show()\n        );\n\n        addButton(box, "TPS SWEEP", this::confirmTpsSweep);
         addButton(box, "SECONDARY THROTTLE / STVA TEST", this::confirmStvaTest);
         addButton(box, "ADC INPUT IDENTIFIER", () ->
                 openManualDiff(
