@@ -73,7 +73,7 @@ public final class MainActivity extends Activity {
     // continues; they never write through it.
     private volatile BanditLiveData lastLiveData;
 
-    private double injectorFlowCcMin = 220.0;
+    private double injectorFlowCcMin = 280.0;
     private double calibrationFactor = 1.000;
 
     private SharedPreferences prefs;
@@ -181,7 +181,7 @@ public final class MainActivity extends Activity {
         // defaults for now. Older app versions stored injector_flow/cal_factor
         // in SharedPreferences; do not silently import those values while the
         // absolute MPG model is still being verified.
-        injectorFlowCcMin = 220.0;
+        injectorFlowCcMin = 280.0;
         calibrationFactor = 1.000;
         prefs.edit()
                 .remove("injector_flow")
