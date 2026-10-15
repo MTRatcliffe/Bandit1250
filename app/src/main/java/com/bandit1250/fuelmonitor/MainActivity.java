@@ -900,6 +900,7 @@ public final class MainActivity extends Activity {
                 final String message = e.getMessage();
 
                 ui.post(() -> {
+                    endTripSession();
                     if (btWasConnected) {
                         setStatusYellow("BT: OK • SDS: ERR");
                     } else {
@@ -940,6 +941,7 @@ public final class MainActivity extends Activity {
 
                 if (wasPolling) {
                     ui.post(() -> {
+                        endTripSession();
                         setStatusYellow("BT: OK • SDS: ERR");
                         appendLog("POLLING STOPPED: " + e.getMessage());
                         connect.setText("RECONNECT");
@@ -1413,6 +1415,15 @@ public final class MainActivity extends Activity {
         updateSessionReadout();
     }
 
+    private void endTripSession() {
+        sessionTripActive = false;
+        sessionLastGpsTimeMs = -1L;
+        sessionLastGpsSpeedMph = Double.NaN;
+        sessionLastFuelTimeMs = -1L;
+        sessionLastFuelLph = Double.NaN;
+        updateSessionReadout();
+    }
+
     private void beginTripSession() {
         sessionTripActive = true;
         sessionMilesTotal = 0.0;
@@ -1502,8 +1513,7 @@ public final class MainActivity extends Activity {
                 Math.max(0.0, sessionMilesTotal)
         ));
 
-        if (!sessionTripActive ||
-                sessionMilesTotal < 0.001 ||
+        if (sessionMilesTotal < 0.001 ||
                 sessionFuelLitresTotal <= 0.000001) {
             sessionAvgMpg.setText("Avg since connect  — MPG");
             return;
