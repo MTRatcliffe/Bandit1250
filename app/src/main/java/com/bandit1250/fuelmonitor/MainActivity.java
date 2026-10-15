@@ -62,6 +62,8 @@ public final class MainActivity extends Activity {
     private boolean sessionTripActive = false;
     private double sessionMilesTotal = 0.0;
     private double sessionFuelLitresTotal = 0.0;
+    private long sessionStartTimeMs = -1L;
+    private long sessionEndTimeMs = -1L;
     private long sessionLastGpsTimeMs = -1L;
     private double sessionLastGpsSpeedMph = Double.NaN;
     private long sessionLastFuelTimeMs = -1L;
@@ -90,6 +92,8 @@ public final class MainActivity extends Activity {
     private TextView avgMpg;
     private TextView sessionAvgMpg;
     private TextView sessionMiles;
+    private TextView sessionLitres;
+    private TextView sessionHours;
     private TextView fuelRate;
     private TextView gpsMeta;
     private TextView decoded;
@@ -256,7 +260,7 @@ public final class MainActivity extends Activity {
                 "CONNECT performs Bluetooth connection, SDS initialisation and continuous polling.\n" +
                 "Tap 📈 beside Live ECU data to show/hide the full diagnostics chart stack.\n" +
                 "Tap ⚙ beside Fuel L/h to edit injector flow and tank calibration factor for this app session only. Older-version calibration values are ignored.\n" +
-                "Session MPG is total miles divided by total estimated fuel since the current ECU connection; Miles since connect is GPS-speed integrated.\n" +
+                "Session MPG is total miles divided by total estimated fuel since the current ECU connection. Miles are GPS-speed integrated; litres are fuel-flow integrated; hours are elapsed connected-session time.\n" +
                 "FAST 30 s CAPTURE pauses normal display updates and records 21 08 at the maximum practical ELM rate, then freezes the result in the chart stack.\n" +
                 "ACTIVE opens firmware-derived A5 controls; GUIDED includes fast contribution/roughness/engineering tests; ENG opens raw engineering pages.\n" +
                 "Injector latency is automatically interpolated from the ECU battery raw byte using the firmware-derived table."
@@ -334,6 +338,18 @@ public final class MainActivity extends Activity {
         sessionMiles.setTextSize(18);
         sessionMiles.setGravity(Gravity.CENTER_HORIZONTAL);
         mpgPanel.addView(sessionMiles);
+
+        sessionLitres = new TextView(this);
+        sessionLitres.setText("Litres since connect  0.000");
+        sessionLitres.setTextSize(18);
+        sessionLitres.setGravity(Gravity.CENTER_HORIZONTAL);
+        mpgPanel.addView(sessionLitres);
+
+        sessionHours = new TextView(this);
+        sessionHours.setText("Hours since connect  0.00");
+        sessionHours.setTextSize(18);
+        sessionHours.setGravity(Gravity.CENTER_HORIZONTAL);
+        mpgPanel.addView(sessionHours);
 
         LinearLayout fuelRow = row();
         fuelRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -1408,6 +1424,8 @@ public final class MainActivity extends Activity {
         sessionTripActive = false;
         sessionMilesTotal = 0.0;
         sessionFuelLitresTotal = 0.0;
+        sessionStartTimeMs = -1L;
+        sessionEndTimeMs = -1L;
         sessionLastGpsTimeMs = -1L;
         sessionLastGpsSpeedMph = Double.NaN;
         sessionLastFuelTimeMs = -1L;
@@ -1416,6 +1434,9 @@ public final class MainActivity extends Activity {
     }
 
     private void endTripSession() {
+        if (sessionTripActive) {
+            sessionEndTimeMs = SystemClock.elapsedRealtime();
+        }
         sessionTripActive = false;
         sessionLastGpsTimeMs = -1L;
         sessionLastGpsSpeedMph = Double.NaN;
@@ -1430,6 +1451,8 @@ public final class MainActivity extends Activity {
         sessionFuelLitresTotal = 0.0;
 
         long now = SystemClock.elapsedRealtime();
+        sessionStartTimeMs = now;
+        sessionEndTimeMs = -1L;
 
         // Seed the current GPS speed at the connection boundary so the first
         // subsequent GPS update can integrate from the actual session start.
@@ -1505,12 +1528,34 @@ public final class MainActivity extends Activity {
     }
 
     private void updateSessionReadout() {
-        if (sessionMiles == null || sessionAvgMpg == null) return;
+        if (sessionMiles == null ||
+                sessionLitres == null ||
+                sessionHours == null ||
+                sessionAvgMpg == null) return;
 
         sessionMiles.setText(String.format(
                 Locale.UK,
                 "Miles since connect  %.2f",
                 Math.max(0.0, sessionMilesTotal)
+        ));
+
+        sessionLitres.setText(String.format(
+                Locale.UK,
+                "Litres since connect  %.3f",
+                Math.max(0.0, sessionFuelLitresTotal)
+        ));
+
+        long sessionNow = sessionTripActive
+                ? SystemClock.elapsedRealtime()
+                : sessionEndTimeMs;
+        double hours = sessionStartTimeMs >= 0L && sessionNow >= sessionStartTimeMs
+                ? (sessionNow - sessionStartTimeMs) / 3_600_000.0
+                : 0.0;
+
+        sessionHours.setText(String.format(
+                Locale.UK,
+                "Hours since connect  %.2f",
+                Math.max(0.0, hours)
         ));
 
         if (sessionMilesTotal < 0.001 ||
