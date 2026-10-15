@@ -29,6 +29,10 @@ public final class MainActivity extends Activity {
     private static final long HISTORY_WINDOW_MS = 120_000L;
     private static final long FAST_CAPTURE_MS = 30_000L;
 
+    // Trip/session totals are reset on every successful ECU connection.
+    // A very large gap is treated as a break rather than integrating stale data.
+    private static final long SESSION_MAX_GAP_MS = 120_000L;
+
     private static final int STATUS_RED = Color.rgb(190, 0, 0);
     private static final int STATUS_YELLOW = Color.rgb(180, 130, 0);
     private static final int STATUS_GREEN = Color.rgb(0, 130, 0);
@@ -53,6 +57,15 @@ public final class MainActivity extends Activity {
     private volatile double gpsAccuracyM = Double.NaN;
     private volatile double lastEstimatedLph = Double.NaN;
     private volatile long lastPollDurationMs = -1;
+
+    // Since-connection trip totals. Updated only on the UI thread.
+    private boolean sessionTripActive = false;
+    private double sessionMilesTotal = 0.0;
+    private double sessionFuelLitresTotal = 0.0;
+    private long sessionLastGpsTimeMs = -1L;
+    private double sessionLastGpsSpeedMph = Double.NaN;
+    private long sessionLastFuelTimeMs = -1L;
+    private double sessionLastFuelLph = Double.NaN;
     // Latest successfully decoded 21 08 sample. Active-control screens use
     // this read-only snapshot for live verification while normal polling
     // continues; they never write through it.
@@ -75,6 +88,8 @@ public final class MainActivity extends Activity {
     private TextView status;
     private TextView instantMpg;
     private TextView avgMpg;
+    private TextView sessionAvgMpg;
+    private TextView sessionMiles;
     private TextView fuelRate;
     private TextView gpsMeta;
     private TextView decoded;
@@ -157,8 +172,18 @@ public final class MainActivity extends Activity {
 
         prefs = getSharedPreferences("bandit_monitor", MODE_PRIVATE);
         protocolLogger = new ProtocolSessionLogger(this);
-        injectorFlowCcMin = readDoublePref("injector_flow", 220.0);
-        calibrationFactor = readDoublePref("cal_factor", 1.000);
+
+        // Deliberately start every updated build from clean fuel-calibration
+        // defaults for now. Older app versions stored injector_flow/cal_factor
+        // in SharedPreferences; do not silently import those values while the
+        // absolute MPG model is still being verified.
+        injectorFlowCcMin = 220.0;
+        calibrationFactor = 1.000;
+        prefs.edit()
+                .remove("injector_flow")
+                .remove("cal_factor")
+                .remove("net_latency")
+                .apply();
 
         buildUi();
 
@@ -204,7 +229,7 @@ public final class MainActivity extends Activity {
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("Bandit Monitor V0.27.0-test");
+        title.setText("Bandit Monitor V0.28.0-test");
         title.setTextSize(20);
         title.setTypeface(null, Typeface.BOLD);
         title.setSingleLine(true);
@@ -230,7 +255,8 @@ public final class MainActivity extends Activity {
                 "2008 GSF1250SA • ELM327 Bluetooth • Suzuki SDS 21 08\n" +
                 "CONNECT performs Bluetooth connection, SDS initialisation and continuous polling.\n" +
                 "Tap 📈 beside Live ECU data to show/hide the full diagnostics chart stack.\n" +
-                "Tap ⚙ beside Fuel L/h to edit injector flow and tank calibration factor.\n" +
+                "Tap ⚙ beside Fuel L/h to edit injector flow and tank calibration factor for this app session only. Older-version calibration values are ignored.\n" +
+                "Session MPG is total miles divided by total estimated fuel since the current ECU connection; Miles since connect is GPS-speed integrated.\n" +
                 "FAST 30 s CAPTURE pauses normal display updates and records 21 08 at the maximum practical ELM rate, then freezes the result in the chart stack.\n" +
                 "ACTIVE opens firmware-derived A5 controls; GUIDED includes fast contribution/roughness/engineering tests; ENG opens raw engineering pages.\n" +
                 "Injector latency is automatically interpolated from the ECU battery raw byte using the firmware-derived table."
@@ -295,6 +321,19 @@ public final class MainActivity extends Activity {
         avgMpg.setTypeface(null, Typeface.BOLD);
         avgMpg.setGravity(Gravity.CENTER_HORIZONTAL);
         mpgPanel.addView(avgMpg);
+
+        sessionAvgMpg = new TextView(this);
+        sessionAvgMpg.setText("Avg since connect  — MPG");
+        sessionAvgMpg.setTextSize(23);
+        sessionAvgMpg.setTypeface(null, Typeface.BOLD);
+        sessionAvgMpg.setGravity(Gravity.CENTER_HORIZONTAL);
+        mpgPanel.addView(sessionAvgMpg);
+
+        sessionMiles = new TextView(this);
+        sessionMiles.setText("Miles since connect  0.00");
+        sessionMiles.setTextSize(18);
+        sessionMiles.setGravity(Gravity.CENTER_HORIZONTAL);
+        mpgPanel.addView(sessionMiles);
 
         LinearLayout fuelRow = row();
         fuelRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -727,6 +766,7 @@ public final class MainActivity extends Activity {
                         ? location.getSpeed() * 2.2369362920544
                         : Double.NaN;
 
+                updateSessionDistance(gpsSpeedMph);
                 updateMpgPanel();
             }
 
@@ -801,6 +841,9 @@ public final class MainActivity extends Activity {
         history.clear();
         lastHistorySampleMs = 0;
         lastPollDurationMs = -1;
+        lastEstimatedLph = Double.NaN;
+        lastLiveData = null;
+        resetTripSession();
         if (diagnosticsPanel != null) diagnosticsPanel.resetSession();
 
         io.execute(() -> {
@@ -839,6 +882,7 @@ public final class MainActivity extends Activity {
                 polling = true;
 
                 ui.post(() -> {
+                    beginTripSession();
                     raw.setText(first);
                     decodeAndShow(first);
                     updateConnectedStatus();
@@ -1089,7 +1133,9 @@ public final class MainActivity extends Activity {
         TextView latencyInfo = text(
                 "Injector battery-voltage latency is automatic.\n" +
                 "The app interpolates the firmware-derived table directly from the " +
-                "raw 21 08 battery byte and subtracts it once from each injector pulse."
+                "raw 21 08 battery byte and subtracts it once from each injector pulse.\n\n" +
+                "For now these calibration edits are SESSION ONLY. Values saved by older " +
+                "app versions are deliberately ignored so they cannot bias MPG validation."
         );
         latencyInfo.setTextSize(12);
         box.addView(latencyInfo);
@@ -1113,20 +1159,14 @@ public final class MainActivity extends Activity {
                             calibrationFactor
                     );
 
-                    prefs.edit()
-                            .putLong("injector_flow", Double.doubleToRawLongBits(injectorFlowCcMin))
-                            .putLong("cal_factor", Double.doubleToRawLongBits(calibrationFactor))
-                            .remove("net_latency")
-                            .apply();
+                    // Do not persist fuel calibration while absolute MPG is
+                    // still under validation. This prevents values from an
+                    // earlier version/session silently affecting a later test.
+                    resetTripSession();
+                    if (polling) beginTripSession();
+                    toast("Fuel calibration changed; since-connect totals reset.");
                 })
                 .show();
-    }
-
-    private double readDoublePref(String key, double def) {
-        if (!prefs.contains(key)) return def;
-        return Double.longBitsToDouble(
-                prefs.getLong(key, Double.doubleToRawLongBits(def))
-        );
     }
 
     // ---------------------------------------------------------------------
@@ -1155,6 +1195,7 @@ public final class MainActivity extends Activity {
             );
 
             lastEstimatedLph = estimatedLph;
+            updateSessionFuel(estimatedLph);
 
             decoded.setVisibility(View.GONE);
             renderLiveDataTable(d);
@@ -1164,6 +1205,7 @@ public final class MainActivity extends Activity {
 
         } catch (Exception e) {
             lastEstimatedLph = Double.NaN;
+            updateSessionFuel(Double.NaN);
 
             decoded.setVisibility(View.VISIBLE);
             decoded.setText(
@@ -1345,6 +1387,8 @@ public final class MainActivity extends Activity {
             avgMpg.setText("10 s MPG  —");
         }
 
+        updateSessionReadout();
+
         String speed = Double.isNaN(gpsSpeedMph)
                 ? "—"
                 : String.format(Locale.UK, "%.1f", gpsSpeedMph);
@@ -1356,6 +1400,128 @@ public final class MainActivity extends Activity {
         gpsMeta.setText(
                 "GPS " + speed + " mph  •  ±" + accuracy + " m"
         );
+    }
+
+    private void resetTripSession() {
+        sessionTripActive = false;
+        sessionMilesTotal = 0.0;
+        sessionFuelLitresTotal = 0.0;
+        sessionLastGpsTimeMs = -1L;
+        sessionLastGpsSpeedMph = Double.NaN;
+        sessionLastFuelTimeMs = -1L;
+        sessionLastFuelLph = Double.NaN;
+        updateSessionReadout();
+    }
+
+    private void beginTripSession() {
+        sessionTripActive = true;
+        sessionMilesTotal = 0.0;
+        sessionFuelLitresTotal = 0.0;
+
+        long now = SystemClock.elapsedRealtime();
+
+        // Seed the current GPS speed at the connection boundary so the first
+        // subsequent GPS update can integrate from the actual session start.
+        if (Double.isFinite(gpsSpeedMph) && gpsSpeedMph >= 0.0) {
+            sessionLastGpsTimeMs = now;
+            sessionLastGpsSpeedMph = gpsSpeedMph;
+        } else {
+            sessionLastGpsTimeMs = -1L;
+            sessionLastGpsSpeedMph = Double.NaN;
+        }
+
+        sessionLastFuelTimeMs = -1L;
+        sessionLastFuelLph = Double.NaN;
+        updateSessionReadout();
+    }
+
+    private void updateSessionDistance(double currentSpeedMph) {
+        if (!sessionTripActive) return;
+
+        long now = SystemClock.elapsedRealtime();
+
+        if (!Double.isFinite(currentSpeedMph) || currentSpeedMph < 0.0) {
+            sessionLastGpsTimeMs = -1L;
+            sessionLastGpsSpeedMph = Double.NaN;
+            updateSessionReadout();
+            return;
+        }
+
+        if (sessionLastGpsTimeMs >= 0L &&
+                Double.isFinite(sessionLastGpsSpeedMph)) {
+            long dtMs = now - sessionLastGpsTimeMs;
+
+            if (dtMs > 0L && dtMs <= SESSION_MAX_GAP_MS) {
+                double hours = dtMs / 3_600_000.0;
+                double averageSpeed =
+                        (sessionLastGpsSpeedMph + currentSpeedMph) / 2.0;
+                sessionMilesTotal += Math.max(0.0, averageSpeed) * hours;
+            }
+        }
+
+        sessionLastGpsTimeMs = now;
+        sessionLastGpsSpeedMph = currentSpeedMph;
+        updateSessionReadout();
+    }
+
+    private void updateSessionFuel(double currentLph) {
+        if (!sessionTripActive) return;
+
+        long now = SystemClock.elapsedRealtime();
+
+        if (!Double.isFinite(currentLph) || currentLph < 0.0) {
+            sessionLastFuelTimeMs = -1L;
+            sessionLastFuelLph = Double.NaN;
+            updateSessionReadout();
+            return;
+        }
+
+        if (sessionLastFuelTimeMs >= 0L &&
+                Double.isFinite(sessionLastFuelLph)) {
+            long dtMs = now - sessionLastFuelTimeMs;
+
+            if (dtMs > 0L && dtMs <= SESSION_MAX_GAP_MS) {
+                double hours = dtMs / 3_600_000.0;
+                double averageLph =
+                        (sessionLastFuelLph + currentLph) / 2.0;
+                sessionFuelLitresTotal += Math.max(0.0, averageLph) * hours;
+            }
+        }
+
+        sessionLastFuelTimeMs = now;
+        sessionLastFuelLph = currentLph;
+        updateSessionReadout();
+    }
+
+    private void updateSessionReadout() {
+        if (sessionMiles == null || sessionAvgMpg == null) return;
+
+        sessionMiles.setText(String.format(
+                Locale.UK,
+                "Miles since connect  %.2f",
+                Math.max(0.0, sessionMilesTotal)
+        ));
+
+        if (!sessionTripActive ||
+                sessionMilesTotal < 0.001 ||
+                sessionFuelLitresTotal <= 0.000001) {
+            sessionAvgMpg.setText("Avg since connect  — MPG");
+            return;
+        }
+
+        double mpg =
+                sessionMilesTotal /
+                (sessionFuelLitresTotal / UK_LITRES_PER_GALLON);
+
+        if (Double.isFinite(mpg) && mpg >= 0.0 && mpg < 9999.0) {
+            sessionAvgMpg.setText(String.format(
+                    Locale.UK,
+                    "Avg since connect  %.1f MPG",
+                    mpg
+            ));
+        } else {
+            sessionAvgMpg.setText("Avg since connect  — MPG");
+        }
     }
 
     private double calculateInstantMpg() {
