@@ -174,6 +174,11 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
 
+        // Keep the display awake while Bandit Monitor is in the foreground.
+        // Android automatically restores the normal screen-timeout behaviour
+        // when this Activity is no longer visible.
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
         prefs = getSharedPreferences("bandit_monitor", MODE_PRIVATE);
         protocolLogger = new ProtocolSessionLogger(this);
 
